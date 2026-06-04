@@ -418,6 +418,7 @@ export default function App() {
   const [sfErr, setSfErr]           = useState("");
   const [selectedYear, setYear]     = useState("all");
   const [importError, setImportError] = useState("");
+  const [selectedIds, setSelectedIds] = useState(new Set());
 
   const today = new Date().toISOString().slice(0, 10);
   const [rangeStart, setRangeStart] = useState(today.slice(0, 4) + "-01-01");
@@ -778,7 +779,7 @@ export default function App() {
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
             {["portfolio", "history", "trades", "range"].map((v) => (
               <button key={v} className={`nb ${view === v ? "act" : ""}`} onClick={() => setView(v)}>
-                {{ portfolio: "📊 持股", history: "🏆 歷史", trades: "📋 交易", range: "📅 區間損益" }[v]}
+                {{ portfolio: "📊 持股明細", history: "🏆 歷史損益", trades: "📋 交易明細", range: "📅 區間損益" }[v]}
               </button>
             ))}
             <div style={{ position: "relative", marginLeft: 8 }} onClick={() => setUserMenu((x) => !x)}>
@@ -986,40 +987,67 @@ export default function App() {
         })()}
 
         {/* Trades View */}
-        {!tradesLoading && view === "trades" && (
-          <div className="card">
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-              <h2 style={{ fontSize: 15, fontWeight: 600, flex: 1 }}>交易記錄</h2>
-              <input placeholder="搜尋代號/名稱" value={filterStock} onChange={(e) => setFilter(e.target.value)} style={{ width: 140 }} />
-              <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ width: 110 }}>
-                <option value="date">依日期</option><option value="stock">依代號</option>
-              </select>
-              <button className="btn btn-p" onClick={() => { setEditTrade(null); setForm(emptyForm()); setStockLookup({ loading: false, error: "" }); setShowForm(true); }}>+ 新增</button>
-            </div>
-            {filteredTrades.length === 0 ? <div className="emp">📭 無交易記錄</div> : (
-              <div style={{ overflowX: "auto" }}>
-                <table className="tbl">
-                  <thead><tr><th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th><th>手續費＋稅</th><th>金額</th><th>損益（賣出）</th><th>操作</th></tr></thead>
-                  <tbody>
-                    {filteredTrades.map((t) => (
-                      <tr key={t.id}>
-                        <td style={{ color: "#8b949e" }}>{t.date}</td>
-                        <td><div style={{ fontWeight: 600 }}>{t.stock}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{t.name}</div></td>
-                        <td><span className={t.type === "buy" ? "tag-b" : "tag-s"}>{t.type === "buy" ? "買進" : "賣出"}</span></td>
-                        <td className="mono">{fmtNum(t.qty)}</td>
-                        <td className="mono">{fmtNum(t.price, 2)}</td>
-                        <td className="mono pz">{fmtNum((t.fee || 0) + (t.tax || 0))}</td>
-                        <td className="mono">{fmtNum(t.qty * t.price)}</td>
-                        <td>{t.type === "sell" && t.sellPnl !== null ? <div><div className={`mono ${t.sellPnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(t.sellPnl))}</div><span className="bdg" style={{ background: t.sellPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: t.sellPct >= 0 ? "#3fb950" : "#f85149" }}>{t.sellPct >= 0 ? "+" : ""}{t.sellPct.toFixed(2)}%</span></div> : <span style={{ color: "#484f58" }}>—</span>}</td>
-                        <td><div style={{ display: "flex", gap: 6 }}><button className="btn btn-g" onClick={() => openEdit(t)}>✏️</button><button className="btn btn-d" onClick={() => deleteTrade(t.id)}>✕</button></div></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        {!tradesLoading && view === "trades" && (() => {
+          const allIds = filteredTrades.map((t) => t.id);
+          const allSelected = allIds.length > 0 && allIds.every((id) => selectedIds.has(id));
+          const someSelected = selectedIds.size > 0;
+          const toggleAll = () => { if (allSelected) setSelectedIds(new Set()); else setSelectedIds(new Set(allIds)); };
+          const toggleOne = (id) => setSelectedIds((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+          const deleteSelected = async () => {
+            if (!window.confirm(`確定要刪除選取的 ${selectedIds.size} 筆交易？`)) return;
+            try {
+              for (const id of selectedIds) { await supa(`trades?id=eq.${id}`, { method: "DELETE" }); }
+              setTrades((p) => p.filter((t) => !selectedIds.has(t.id)));
+              setSelectedIds(new Set());
+              notify(`已刪除 ${selectedIds.size} 筆`);
+            } catch (e) { notify("刪除失敗：" + e.message, "error"); }
+          };
+          return (
+            <div className="card">
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                <h2 style={{ fontSize: 15, fontWeight: 600, flex: 1 }}>交易明細</h2>
+                <input placeholder="搜尋代號/名稱" value={filterStock} onChange={(e) => setFilter(e.target.value)} style={{ width: 140 }} />
+                <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ width: 110 }}>
+                  <option value="date">依日期</option><option value="stock">依代號</option>
+                </select>
+                {someSelected && (
+                  <button className="btn btn-d" onClick={deleteSelected}>🗑 刪除選取（{selectedIds.size}）</button>
+                )}
+                <button className="btn btn-p" onClick={() => { setEditTrade(null); setForm(emptyForm()); setStockLookup({ loading: false, error: "" }); setShowForm(true); }}>+ 新增</button>
               </div>
-            )}
-          </div>
-        )}
+              {filteredTrades.length === 0 ? <div className="emp">📭 無交易記錄</div> : (
+                <div style={{ overflowX: "auto" }}>
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 36 }}>
+                          <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{ width: 15, height: 15, cursor: "pointer", accentColor: "#58a6ff" }} />
+                        </th>
+                        <th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th><th>手續費＋稅</th><th>金額</th><th>損益（賣出）</th><th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredTrades.map((t) => (
+                        <tr key={t.id} style={{ background: selectedIds.has(t.id) ? "#1a2a3a" : undefined }}>
+                          <td><input type="checkbox" checked={selectedIds.has(t.id)} onChange={() => toggleOne(t.id)} style={{ width: 15, height: 15, cursor: "pointer", accentColor: "#58a6ff" }} /></td>
+                          <td style={{ color: "#8b949e" }}>{t.date}</td>
+                          <td><div style={{ fontWeight: 600 }}>{t.stock}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{t.name}</div></td>
+                          <td><span className={t.type === "buy" ? "tag-b" : "tag-s"}>{t.type === "buy" ? "買進" : "賣出"}</span></td>
+                          <td className="mono">{fmtNum(t.qty)}</td>
+                          <td className="mono">{fmtNum(t.price, 2)}</td>
+                          <td className="mono pz">{fmtNum((t.fee || 0) + (t.tax || 0))}</td>
+                          <td className="mono">{fmtNum(t.qty * t.price)}</td>
+                          <td>{t.type === "sell" && t.sellPnl !== null ? <div><div className={`mono ${t.sellPnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(t.sellPnl))}</div><span className="bdg" style={{ background: t.sellPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: t.sellPct >= 0 ? "#3fb950" : "#f85149" }}>{t.sellPct >= 0 ? "+" : ""}{t.sellPct.toFixed(2)}%</span></div> : <span style={{ color: "#484f58" }}>—</span>}</td>
+                          <td><div style={{ display: "flex", gap: 6 }}><button className="btn btn-g" onClick={() => openEdit(t)}>✏️</button><button className="btn btn-d" onClick={() => deleteTrade(t.id)}>✕</button></div></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Range View */}
         {!tradesLoading && view === "range" && (
