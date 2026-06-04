@@ -783,8 +783,10 @@ export default function App() {
           </div>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
             {["portfolio", "history", "trades", "range"].map((v) => (
-              <button key={v} className={`nb ${view === v ? "act" : ""}`} onClick={() => setView(v)}>
-                {{ portfolio: "📊 持股明細", history: "🏆 歷史損益", trades: "📋 交易明細", range: "📅 區間損益" }[v]}
+              <button key={v} className={`nb ${view === v ? "act" : ""}`} onClick={() => setView(v)}
+                style={{ padding: "8px 10px", fontSize: 13 }}>
+                {{ portfolio: "📊 持股", history: "🏆 歷史", trades: "📋 交易", range: "📅 區間" }[v]}
+                <span className="hm" style={{ marginLeft: 2 }}>{{ portfolio: "明細", history: "損益", trades: "明細", range: "損益" }[v]}</span>
               </button>
             ))}
             <div style={{ position: "relative", marginLeft: 8 }} onClick={() => setUserMenu((x) => !x)}>
