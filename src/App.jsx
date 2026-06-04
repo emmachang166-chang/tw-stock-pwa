@@ -12,7 +12,6 @@ const BASE_FEE_RATE = 0.001425;
 const calcFee = (qty, price, disc) =>
   Math.max(1, Math.round(qty * price * BASE_FEE_RATE * disc));
 
-// Auto-refresh interval: 5 minutes (in ms)
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
 const BROKERS = [
@@ -64,9 +63,6 @@ const getUsers  = () => {
 };
 const saveUsers = (u) => localStorage.setItem(USERS_KEY, JSON.stringify(u));
 
-// ─────────────────────────────────────────────
-//  STOCK_DB: code → name (offline lookup)
-// ─────────────────────────────────────────────
 const STOCK_DB = {
   "2330":"台積電","2303":"聯電","2454":"聯發科","3711":"日月光投控","2379":"瑞昱",
   "3034":"聯詠","2408":"南亞科","2344":"華邦電","2449":"京元電子","6415":"矽力-KY",
@@ -92,7 +88,6 @@ const STOCK_DB = {
   "006208":"富邦台灣采吉50","00713":"元大台灣高息低波","00830":"國泰費城半導體",
   "00850":"元大臺灣ESG永續","00861":"元大全球AI","00891":"中信關鍵半導體",
   "00894":"中信小資高息ETF","00927":"群益半導體收益","00930":"永豐智能車供應鏈",
-  // 美股常用
   "AAPL":"Apple","MSFT":"Microsoft","GOOGL":"Alphabet","AMZN":"Amazon",
   "NVDA":"NVIDIA","META":"Meta","TSLA":"Tesla","AVGO":"Broadcom",
   "TSM":"台積電ADR","AMD":"AMD","INTC":"Intel","QCOM":"Qualcomm",
@@ -115,17 +110,13 @@ const lookupCodeByName = (name) => {
   return null;
 };
 
-// ── Determine if a code is a TW stock (add .TW suffix for Yahoo) ──
 const toYahooSymbol = (code) => {
   const c = String(code).trim().toUpperCase();
-  // US stocks / ETFs: all letters, or known US tickers
   if (/^[A-Z]{1,5}$/.test(c)) return c;
-  // TW ETFs with letters (e.g. 006208)
   if (/^\d{4,6}[A-Z]?$/.test(c)) return `${c}.TW`;
   return c;
 };
 
-// ── Column header fuzzy matcher ──
 const matchHeader = (h) => {
   const s = (h || "").replace(/[\s"'\u3000\r\n]/g, "").toLowerCase();
   if (/^(日期|成交日|交割日|date|tradedate|交易日)/.test(s)) return "date";
@@ -244,10 +235,6 @@ const tradesToCsv = (trades) => {
   return [hdr, ...rows].map((r) => r.map(csvEscape).join(",")).join("\n");
 };
 
-// ══════════════════════════════════════════
-//  Auto Price Fetcher
-//  Calls our Vercel /api/quote proxy
-// ══════════════════════════════════════════
 const fetchQuotes = async (codes) => {
   if (!codes || codes.length === 0) return {};
   const symbols = codes.map(toYahooSymbol).join(",");
@@ -256,7 +243,6 @@ const fetchQuotes = async (codes) => {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (!data.quotes) return {};
-    // Map back: yahooSymbol → original code
     const result = {};
     codes.forEach((code) => {
       const ySym = toYahooSymbol(code);
@@ -417,7 +403,6 @@ export default function App() {
     catch { return []; }
   });
 
-  // Live prices: { [code]: { price, prevClose, changePct, name, currency, marketState } }
   const [livePrices, setLivePrices]   = useState({});
   const [priceLoading, setPriceLoading] = useState(false);
   const [priceError, setPriceError]   = useState("");
@@ -439,6 +424,14 @@ export default function App() {
   const [selectedYear, setYear]     = useState("all");
   const [importError, setImportError] = useState("");
 
+  // ── 區間損益 state ──
+  const today = new Date().toISOString().slice(0, 10);
+  const firstDay = trades.length > 0
+    ? [...trades].sort((a, b) => a.date.localeCompare(b.date))[0].date
+    : today;
+  const [rangeStart, setRangeStart] = useState(firstDay);
+  const [rangeEnd,   setRangeEnd]   = useState(today);
+
   const emptyForm = () => ({
     date: new Date().toISOString().slice(0, 10), stock: "", name: "", type: "buy", qty: "", price: "", fee: "", tax: "",
   });
@@ -448,10 +441,8 @@ export default function App() {
   const fileInputRef = useRef();
   const autoRefreshTimer = useRef(null);
 
-  // Held stock codes (unique, for fetching quotes)
   const heldCodes = useMemo(() => [...new Set(trades.map((t) => t.stock))], [trades]);
 
-  // ── Fetch live prices from /api/quote ──
   const refreshPrices = useCallback(async (silent = false) => {
     if (heldCodes.length === 0) return;
     if (!silent) setPriceLoading(true);
@@ -472,7 +463,6 @@ export default function App() {
     if (!silent) setPriceLoading(false);
   }, [heldCodes, uid]);
 
-  // On mount + when held codes change: fetch immediately, then set up auto-refresh
   useEffect(() => {
     if (!uid || heldCodes.length === 0) return;
     refreshPrices(false);
@@ -480,12 +470,10 @@ export default function App() {
     return () => clearInterval(autoRefreshTimer.current);
   }, [uid, heldCodes.join(",")]); // eslint-disable-line
 
-  // Persist trades
   useEffect(() => { if (uid) localStorage.setItem(TRADES_KEY(uid), JSON.stringify(trades)); }, [trades, uid]);
 
   const notify = (msg, type = "success") => { setNotif({ msg, type }); setTimeout(() => setNotif(null), 4000); };
 
-  // ── Stock lookup from STOCK_DB ──
   const lookupStock = useCallback((code) => {
     if (!code) return;
     const name = lookupNameByCode(code);
@@ -558,6 +546,94 @@ export default function App() {
     return tC === 0 ? 0 : totalUnrealized * (cY / tC);
   }, [trades, selectedYear, totalUnrealized]);
 
+  // ── 區間損益計算 ──
+  const rangeStats = useMemo(() => {
+    if (!rangeStart || !rangeEnd) return null;
+    const inRange = (d) => d >= rangeStart && d <= rangeEnd;
+
+    // 已實現：區間內賣出的損益
+    let realized = 0;
+    const stockMap = {};
+    trades.forEach((t) => {
+      if (!stockMap[t.stock]) stockMap[t.stock] = { qty: 0, cost: 0 };
+      const sm = stockMap[t.stock];
+      if (t.type === "buy") {
+        sm.cost += t.qty * t.price + (t.fee || 0);
+        sm.qty  += t.qty;
+      } else {
+        const avg = sm.qty > 0 ? sm.cost / sm.qty : 0;
+        const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
+        if (inRange(t.date)) realized += pnl;
+        sm.cost -= avg * t.qty;
+        sm.qty  -= t.qty;
+      }
+    });
+
+    // 未實現：區間內買入的股票，以現價計算
+    const buyInRange = {};
+    trades.filter((t) => t.type === "buy" && inRange(t.date)).forEach((t) => {
+      if (!buyInRange[t.stock]) buyInRange[t.stock] = { qty: 0, cost: 0, name: t.name };
+      buyInRange[t.stock].qty  += t.qty;
+      buyInRange[t.stock].cost += t.qty * t.price + (t.fee || 0);
+    });
+    // 扣掉在此買入後又賣掉的部分
+    trades.filter((t) => t.type === "sell").forEach((t) => {
+      if (buyInRange[t.stock]) {
+        const sm = buyInRange[t.stock];
+        const avgCost = sm.qty > 0 ? sm.cost / sm.qty : 0;
+        sm.cost -= avgCost * Math.min(t.qty, sm.qty);
+        sm.qty  -= Math.min(t.qty, sm.qty);
+        if (sm.qty < 0) sm.qty = 0;
+      }
+    });
+
+    let unrealCost = 0, unrealMkt = 0;
+    const unrealRows = Object.entries(buyInRange)
+      .filter(([, v]) => v.qty > 0)
+      .map(([code, v]) => {
+        const lp = livePrices[code];
+        const cur = lp ? lp.price : (v.cost / v.qty);
+        const mkt = v.qty * cur;
+        const pnl = mkt - v.cost;
+        const pct = v.cost > 0 ? (pnl / v.cost) * 100 : 0;
+        unrealCost += v.cost;
+        unrealMkt  += mkt;
+        const dbName = lookupNameByCode(code);
+        return { code, name: (v.name && v.name !== code) ? v.name : (dbName || code), qty: v.qty, cost: v.cost, mkt, pnl, pct, hasLive: !!lp };
+      });
+
+    const unrealized = unrealMkt - unrealCost;
+    const unrealPct  = unrealCost > 0 ? (unrealized / unrealCost) * 100 : 0;
+    const realPct    = 0; // realized % needs total invested in period
+
+    return { realized, unrealized, unrealPct, unrealRows, unrealCost };
+  }, [trades, rangeStart, rangeEnd, livePrices]);
+
+  // ── 計算每筆賣出的損益（用於交易明細）──
+  const tradesWithPnl = useMemo(() => {
+    const stockMap = {};
+    return trades
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((t) => {
+        if (!stockMap[t.stock]) stockMap[t.stock] = { qty: 0, cost: 0 };
+        const sm = stockMap[t.stock];
+        if (t.type === "buy") {
+          sm.cost += t.qty * t.price + (t.fee || 0);
+          sm.qty  += t.qty;
+          return { ...t, sellPnl: null, sellPct: null };
+        } else {
+          const avg = sm.qty > 0 ? sm.cost / sm.qty : 0;
+          const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
+          const pct = avg > 0 ? ((t.price - avg) / avg) * 100 : 0;
+          sm.cost -= avg * Math.min(t.qty, sm.qty);
+          sm.qty  -= Math.min(t.qty, sm.qty);
+          if (sm.qty < 0) sm.qty = 0;
+          return { ...t, sellPnl: pnl, sellPct: pct };
+        }
+      });
+  }, [trades]);
+
   // ── Trade form submit ──
   const submitTrade = () => {
     if (!form.stock || !form.qty || !form.price) { notify("請填入必要欄位", "error"); return; }
@@ -571,7 +647,6 @@ export default function App() {
   const deleteTrade = (id) => { setTrades((p) => p.filter((t) => t.id !== id)); notify("已刪除"); };
   const openEdit    = (t)  => { setEditTrade(t); setForm({ ...t, fee: t.fee ?? "" }); setShowForm(true); };
 
-  // ── Export CSV ──
   const exportCsv = () => {
     const blob = new Blob(["\uFEFF" + tradesToCsv(trades)], { type: "text/csv;charset=utf-8;" });
     const a = document.createElement("a");
@@ -580,7 +655,6 @@ export default function App() {
     a.click();
   };
 
-  // ── Import file (CSV / XLS / XLSX) ──
   const importFile = (e) => {
     setImportError("");
     const files = Array.from(e.target.files || []);
@@ -621,7 +695,6 @@ export default function App() {
     e.target.value = "";
   };
 
-  // ── Settings ──
   const openSettings = () => {
     setSf({ broker: currentUser.broker || "其他", feeDiscount: currentUser.feeDiscount ?? 0.85, oldPw: "", newPw: "", confirmPw: "" });
     setSfErr(""); setStab("broker"); setSettings(true); setUserMenu(false);
@@ -657,7 +730,7 @@ export default function App() {
     );
   }
 
-  const filteredTrades = [...trades]
+  const filteredTrades = [...tradesWithPnl]
     .filter((t) => !filterStock || t.stock.includes(filterStock) || t.name.includes(filterStock))
     .sort((a, b) => sortBy === "date" ? b.date.localeCompare(a.date) : a.stock.localeCompare(b.stock));
 
@@ -714,6 +787,8 @@ export default function App() {
         .yr-sel{background:#21262d;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;font-size:12px;font-family:inherit;outline:none;cursor:pointer}
         .pulse{animation:pulse 2s ease-in-out infinite}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+        .date-input{background:#21262d;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 10px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
+        .date-input:focus{border-color:#58a6ff}
         @media(max-width:640px){.g2{grid-template-columns:1fr}.hm{display:none}}
       `}</style>
 
@@ -726,9 +801,9 @@ export default function App() {
             <span className="hm" style={{ fontSize: 11, color: "#484f58", marginLeft: 4 }}>Portfolio Tracker</span>
           </div>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            {["portfolio", "history", "trades"].map((v) => (
+            {["portfolio", "history", "trades", "range"].map((v) => (
               <button key={v} className={`nb ${view === v ? "act" : ""}`} onClick={() => setView(v)}>
-                {{ portfolio: "📊 持股", history: "🏆 歷史", trades: "📋 交易" }[v]}
+                {{ portfolio: "📊 持股", history: "🏆 歷史", trades: "📋 交易", range: "📅 區間損益" }[v]}
               </button>
             ))}
             <div style={{ position: "relative", marginLeft: 8 }} onClick={() => setUserMenu((x) => !x)}>
@@ -760,7 +835,6 @@ export default function App() {
           <span className="fb">🏦 {currentUser.broker || "未設定"}</span>
           <span className="fb">✂️ {Math.round(feeDiscount * 10)}折</span>
 
-          {/* Price status */}
           {priceLoading
             ? <span className="fb pulse" style={{ background: "#1a2a3a", color: "#58a6ff", border: "1px solid #58a6ff40" }}><span className="spin" style={{ width: 10, height: 10, margin: "0 4px 0 0" }} />報價更新中…</span>
             : lastFetched
@@ -773,8 +847,7 @@ export default function App() {
             <button className="btn"
               style={{ background: "#388bfd22", color: "#58a6ff", border: "1px solid #58a6ff40", padding: "6px 12px", fontSize: 12, fontWeight: 600 }}
               onClick={() => refreshPrices(false)}
-              disabled={priceLoading}
-              title="手動重新抓取所有持股即時報價">
+              disabled={priceLoading}>
               {priceLoading ? "⏳ 更新中" : "🔄 更新報價"}
             </button>
             <button className="btn btn-b" onClick={exportCsv}>⬇ 匯出紀錄</button>
@@ -784,7 +857,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Import error */}
         {importError && (
           <div style={{ background: "#3a1a1a", border: "1px solid #f8514940", borderRadius: 6, padding: "10px 14px", fontSize: 13, color: "#f85149", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <span>⚠️ 匯入問題：{importError}</span>
@@ -876,11 +948,7 @@ export default function App() {
                                     </div>
                                   </>
                                 )
-                                : (
-                                  <span style={{ color: "#484f58", fontSize: 12 }}>
-                                    {priceLoading ? <span className="spin" /> : "—"}
-                                  </span>
-                                )
+                                : <span style={{ color: "#484f58", fontSize: 12 }}>{priceLoading ? <span className="spin" /> : "—"}</span>
                               }
                             </td>
                             <td>
@@ -1024,7 +1092,12 @@ export default function App() {
               : (
                 <div style={{ overflowX: "auto" }}>
                   <table className="tbl">
-                    <thead><tr><th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th><th>手續費</th><th>交易稅</th><th>金額</th><th>操作</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th>
+                        <th>手續費＋稅</th><th>金額</th><th>損益（賣出）</th><th>操作</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       {filteredTrades.map((t) => (
                         <tr key={t.id}>
@@ -1033,9 +1106,22 @@ export default function App() {
                           <td><span className={t.type === "buy" ? "tag-b" : "tag-s"}>{t.type === "buy" ? "買進" : "賣出"}</span></td>
                           <td className="mono">{fmtNum(t.qty)}</td>
                           <td className="mono">{fmtNum(t.price, 2)}</td>
-                          <td className="mono pz">{fmtNum(t.fee)}</td>
-                          <td className="mono pz">{t.tax ? fmtNum(t.tax) : "—"}</td>
+                          <td className="mono pz">{fmtNum((t.fee || 0) + (t.tax || 0))}</td>
                           <td className="mono">{fmtNum(t.qty * t.price)}</td>
+                          <td>
+                            {t.type === "sell" && t.sellPnl !== null ? (
+                              <div>
+                                <div className={`mono ${t.sellPnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>
+                                  {fmtMoney(Math.round(t.sellPnl))}
+                                </div>
+                                <div>
+                                  <span className="bdg" style={{ background: t.sellPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: t.sellPct >= 0 ? "#3fb950" : "#f85149" }}>
+                                    {t.sellPct >= 0 ? "+" : ""}{t.sellPct.toFixed(2)}%
+                                  </span>
+                                </div>
+                              </div>
+                            ) : <span style={{ color: "#484f58" }}>—</span>}
+                          </td>
                           <td>
                             <div style={{ display: "flex", gap: 6 }}>
                               <button className="btn btn-g" onClick={() => openEdit(t)}>✏️</button>
@@ -1048,6 +1134,97 @@ export default function App() {
                   </table>
                 </div>
               )}
+          </div>
+        )}
+
+        {/* Range PnL View */}
+        {view === "range" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* 日期選擇器 */}
+            <div className="card">
+              <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>📅 自訂區間損益</h2>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 13, color: "#8b949e", whiteSpace: "nowrap" }}>開始日期</span>
+                  <input type="date" className="date-input" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} style={{ width: 160 }} />
+                </div>
+                <span style={{ color: "#484f58" }}>～</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 13, color: "#8b949e", whiteSpace: "nowrap" }}>結束日期</span>
+                  <input type="date" className="date-input" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} style={{ width: 160 }} />
+                </div>
+                <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { setRangeStart(today.slice(0, 4) + "-01-01"); setRangeEnd(today); }}>今年</button>
+                <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { const y = String(Number(today.slice(0, 4)) - 1); setRangeStart(y + "-01-01"); setRangeEnd(y + "-12-31"); }}>去年</button>
+                <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { setRangeStart(firstDay); setRangeEnd(today); }}>全部</button>
+              </div>
+            </div>
+
+            {rangeStats && (
+              <>
+                {/* 摘要卡片 */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
+                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
+                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間已實現損益</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: rangeStats.realized >= 0 ? "#3fb950" : "#f85149" }}>
+                      {fmtMoney(Math.round(rangeStats.realized))}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#484f58", marginTop: 4 }}>區間內賣出已結算</div>
+                  </div>
+                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
+                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間未實現損益</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: rangeStats.unrealized >= 0 ? "#3fb950" : "#f85149" }}>
+                      {fmtMoney(Math.round(rangeStats.unrealized))}
+                    </div>
+                    <div style={{ fontSize: 11, color: rangeStats.unrealPct >= 0 ? "#3fb95099" : "#f8514999", marginTop: 4 }}>
+                      {fmtMoney(rangeStats.unrealPct.toFixed(2))}%　以現價計算
+                    </div>
+                  </div>
+                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
+                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間總損益</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: (rangeStats.realized + rangeStats.unrealized) >= 0 ? "#3fb950" : "#f85149" }}>
+                      {fmtMoney(Math.round(rangeStats.realized + rangeStats.unrealized))}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#484f58", marginTop: 4 }}>已實現＋未實現合計</div>
+                  </div>
+                </div>
+
+                {/* 未實現明細 */}
+                {rangeStats.unrealRows.length > 0 && (
+                  <div className="card">
+                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14, color: "#8b949e" }}>區間買入、尚未賣出的持股（未實現損益明細）</h3>
+                    <div style={{ overflowX: "auto" }}>
+                      <table className="tbl">
+                        <thead>
+                          <tr><th>股票</th><th>持股數</th><th>買入成本</th><th>現值</th><th>未實現損益</th><th>損益%</th></tr>
+                        </thead>
+                        <tbody>
+                          {rangeStats.unrealRows.map((r) => (
+                            <tr key={r.code}>
+                              <td><div style={{ fontWeight: 600 }}>{r.code}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{r.name}</div></td>
+                              <td className="mono">{fmtNum(r.qty)}</td>
+                              <td className="mono pz">{fmtNum(Math.round(r.cost))}</td>
+                              <td className="mono">
+                                {r.hasLive ? fmtNum(Math.round(r.mkt)) : <span style={{ color: "#484f58" }}>—（以成本估）</span>}
+                              </td>
+                              <td className={`mono ${r.pnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(r.pnl))}</td>
+                              <td>
+                                <span className="bdg" style={{ background: r.pct >= 0 ? "#1a3a2a" : "#3a1a1a", color: r.pct >= 0 ? "#3fb950" : "#f85149" }}>
+                                  {fmtMoney(r.pct.toFixed(2))}%
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {rangeStats.unrealRows.length === 0 && rangeStats.realized === 0 && (
+                  <div className="card"><div className="emp">此區間內無交易記錄</div></div>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -1073,7 +1250,7 @@ export default function App() {
               <div className="g2">
                 <div>
                   <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>
-                    股票代號 *（台股 4-6 碼；美股如 AAPL）
+                    股票代號 *
                     {stockLookup.error && <span style={{ color: "#f85149", fontSize: 11, marginLeft: 6 }}>⚠ {stockLookup.error}</span>}
                   </label>
                   <input placeholder="例：2330 或 AAPL" value={form.stock}
