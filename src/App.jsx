@@ -6,22 +6,24 @@ const SUPA_URL = "https://vbibpfapxvyfpvxoqwah.supabase.co";
 const SUPA_KEY = "sb_publishable_dg96WUQavjlew-BxLhFeCg_l853-Y5D";
 
 const supa = async (path, opts = {}) => {
+  const { prefer, headers: extraHeaders, ...fetchOpts } = opts;
   const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
     headers: {
       "apikey": SUPA_KEY,
       "Authorization": `Bearer ${SUPA_KEY}`,
       "Content-Type": "application/json",
-      "Prefer": opts.prefer || "",
-      ...opts.headers,
+      ...(prefer ? { "Prefer": prefer } : {}),
+      ...(extraHeaders || {}),
     },
-    ...opts,
+    ...fetchOpts,
   });
-  if (!res.ok && res.status !== 204) {
+  if (!res.ok) {
     const err = await res.text();
     throw new Error(err);
   }
-  if (res.status === 204) return null;
-  return res.json();
+  const text = await res.text();
+  if (!text) return null;
+  return JSON.parse(text);
 };
 
 // ── Storage Keys (for session only) ──
