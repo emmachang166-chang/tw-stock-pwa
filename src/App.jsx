@@ -7,12 +7,15 @@ const SUPA_KEY = "sb_publishable_dg96WUQavjlew-BxLhFeCg_l853-Y5D";
 
 const supa = async (path, opts = {}) => {
   const { prefer, headers: extraHeaders, ...fetchOpts } = opts;
+  // For write ops, use return=representation to get JSON back; for reads no Prefer needed
+  const isWrite = ["POST","PATCH","PUT","DELETE"].includes((fetchOpts.method||"GET").toUpperCase());
+  const preferHeader = prefer || (isWrite ? "return=representation" : "");
   const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
     headers: {
       "apikey": SUPA_KEY,
       "Authorization": `Bearer ${SUPA_KEY}`,
       "Content-Type": "application/json",
-      ...(prefer ? { "Prefer": prefer } : {}),
+      ...(preferHeader ? { "Prefer": preferHeader } : {}),
       ...(extraHeaders || {}),
     },
     ...fetchOpts,
@@ -22,8 +25,8 @@ const supa = async (path, opts = {}) => {
     throw new Error(err);
   }
   const text = await res.text();
-  if (!text) return null;
-  return JSON.parse(text);
+  if (!text || text === "null") return null;
+  try { return JSON.parse(text); } catch { return null; }
 };
 
 // ── Storage Keys (for session only) ──
