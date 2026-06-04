@@ -774,7 +774,7 @@ export default function App() {
       `}</style>
 
       {/* Header */}
-      <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", padding: "0 24px" }}>
+      <div style={{ background: "#161b22", borderBottom: "1px solid #21262d", padding: "0 24px", paddingTop: "env(safe-area-inset-top, 0px)" }}>
         <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 22 }}>📈</span>
