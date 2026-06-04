@@ -1,18 +1,38 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import * as XLSX from "xlsx";
 
-// ── Storage Keys ──
-const USERS_KEY   = "tw_stock_users";
+// ── Supabase Config ──
+const SUPA_URL = "https://vbibpfapxvyfpvxoqwah.supabase.co";
+const SUPA_KEY = "sb_publishable_dg96WUQavjlew-BxLhFeCg_l853-Y5D";
+
+const supa = async (path, opts = {}) => {
+  const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
+    headers: {
+      "apikey": SUPA_KEY,
+      "Authorization": `Bearer ${SUPA_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": opts.prefer || "",
+      ...opts.headers,
+    },
+    ...opts,
+  });
+  if (!res.ok && res.status !== 204) {
+    const err = await res.text();
+    throw new Error(err);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+};
+
+// ── Storage Keys (for session only) ──
 const SESSION_KEY = "tw_stock_session";
-const TRADES_KEY  = (uid) => `tw_stock_trades_${uid}`;
-const PRICES_KEY  = (uid) => `tw_prices_${uid}`;
-const PRICE_TS_KEY = (uid) => `tw_price_ts_${uid}`;
 
 const BASE_FEE_RATE = 0.001425;
 const calcFee = (qty, price, disc) =>
   Math.max(1, Math.round(qty * price * BASE_FEE_RATE * disc));
 
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
+const PRICE_TS_KEY = (uid) => `tw_price_ts_${uid}`;
 
 const BROKERS = [
   { name: "元大證券",         defaultDiscount: 0.6  },
@@ -33,20 +53,6 @@ const BROKERS = [
   { name: "其他",             defaultDiscount: 0.85 },
 ];
 
-const DEFAULT_USERS = [
-  {
-    id: "u1", username: "admin", password: "admin123",
-    displayName: "管理員", broker: "元大證券", feeDiscount: 0.6,
-  },
-];
-
-const INIT_TRADES = [
-  { id: 1, date: "2024-01-15", stock: "2330", name: "台積電", type: "buy",  qty: 1000, price: 580, fee: 83,  tax: 0 },
-  { id: 2, date: "2024-02-20", stock: "2330", name: "台積電", type: "buy",  qty: 1000, price: 620, fee: 89,  tax: 0 },
-  { id: 3, date: "2024-03-10", stock: "2454", name: "聯發科", type: "buy",  qty: 1000, price: 820, fee: 117, tax: 0 },
-  { id: 4, date: "2024-04-05", stock: "2330", name: "台積電", type: "sell", qty: 500,  price: 700, fee: 100, tax: 105 },
-];
-
 const fmtNum   = (n, d = 0) =>
   Number(n).toLocaleString("zh-TW", { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmtMoney = (n) => `${n >= 0 ? "+" : ""}${fmtNum(n)}`;
@@ -56,12 +62,6 @@ const simpleHash = (s) => {
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return h.toString(36);
 };
-
-const getUsers  = () => {
-  try { const s = localStorage.getItem(USERS_KEY); return s ? JSON.parse(s) : DEFAULT_USERS; }
-  catch { return DEFAULT_USERS; }
-};
-const saveUsers = (u) => localStorage.setItem(USERS_KEY, JSON.stringify(u));
 
 const STOCK_DB = {
   "2330":"台積電","2303":"聯電","2454":"聯發科","3711":"日月光投控","2379":"瑞昱",
@@ -95,11 +95,7 @@ const STOCK_DB = {
 };
 
 const NAME_TO_CODE = Object.fromEntries(Object.entries(STOCK_DB).map(([c, n]) => [n, c]));
-
-const lookupNameByCode = (code) => {
-  if (!code) return null;
-  return STOCK_DB[String(code).trim()] || null;
-};
+const lookupNameByCode = (code) => STOCK_DB[String(code || "").trim()] || null;
 const lookupCodeByName = (name) => {
   if (!name) return null;
   const n = name.trim();
@@ -147,15 +143,9 @@ const parseDate = (v) => {
   if (!s) return "";
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   const roc = s.match(/^(\d{2,3})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
-  if (roc) {
-    const y = parseInt(roc[1]) + 1911;
-    return `${y}-${roc[2].padStart(2, "0")}-${roc[3].padStart(2, "0")}`;
-  }
+  if (roc) { const y = parseInt(roc[1]) + 1911; return `${y}-${roc[2].padStart(2, "0")}-${roc[3].padStart(2, "0")}`; }
   if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-  if (/^\d{7}$/.test(s)) {
-    const y = parseInt(s.slice(0, 3)) + 1911;
-    return `${y}-${s.slice(3, 5)}-${s.slice(5, 7)}`;
-  }
+  if (/^\d{7}$/.test(s)) { const y = parseInt(s.slice(0, 3)) + 1911; return `${y}-${s.slice(3, 5)}-${s.slice(5, 7)}`; }
   return s;
 };
 
@@ -229,9 +219,7 @@ const csvEscape = (v) => {
 };
 const tradesToCsv = (trades) => {
   const hdr = ["日期", "股票代號", "股票名稱", "類型", "數量", "成交價", "手續費", "交易稅"];
-  const rows = trades.map((t) => [
-    t.date, t.stock, t.name, t.type === "buy" ? "買進" : "賣出", t.qty, t.price, t.fee, t.tax || 0,
-  ]);
+  const rows = trades.map((t) => [t.date, t.stock, t.name, t.type === "buy" ? "買進" : "賣出", t.qty, t.price, t.fee, t.tax || 0]);
   return [hdr, ...rows].map((r) => r.map(csvEscape).join(",")).join("\n");
 };
 
@@ -262,6 +250,7 @@ function AuthScreen({ onLogin }) {
   const [tab, setTab]   = useState("login");
   const [f, setF]       = useState({ username: "", password: "", display: "", confirm: "", broker: BROKERS[0].name, feeDiscount: BROKERS[0].defaultDiscount });
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const [shake, setShake] = useState(false);
   const doShake = () => { setShake(true); setTimeout(() => setShake(false), 500); };
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
@@ -270,29 +259,47 @@ function AuthScreen({ onLogin }) {
     setF((p) => ({ ...p, broker: name, feeDiscount: b?.defaultDiscount ?? p.feeDiscount }));
   };
 
-  const doLogin = () => {
-    setError("");
-    const user = getUsers().find((u) => u.username === f.username.trim());
-    if (!user || simpleHash(f.password) !== simpleHash(user.password)) {
-      setError("帳號或密碼錯誤"); doShake(); return;
+  const doLogin = async () => {
+    setError(""); setLoading(true);
+    try {
+      const rows = await supa(`users?username=eq.${encodeURIComponent(f.username.trim())}&select=*`);
+      const user = rows?.[0];
+      if (!user || user.password_hash !== simpleHash(f.password)) {
+        setError("帳號或密碼錯誤"); doShake(); setLoading(false); return;
+      }
+      const sess = { id: user.id, username: user.username, displayName: user.display_name, broker: user.broker, feeDiscount: Number(user.fee_discount) };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+      onLogin(sess);
+    } catch (e) {
+      setError("連線失敗：" + e.message); doShake();
     }
-    const sess = { id: user.id, username: user.username, displayName: user.displayName, broker: user.broker || "其他", feeDiscount: user.feeDiscount ?? 0.85 };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(sess)); onLogin(sess);
+    setLoading(false);
   };
 
-  const doRegister = () => {
-    setError("");
+  const doRegister = async () => {
+    setError(""); 
     if (!f.username.trim() || !f.password || !f.display.trim()) { setError("請填入所有必要欄位"); doShake(); return; }
     if (f.password.length < 6) { setError("密碼至少需要 6 個字元"); doShake(); return; }
     if (f.password !== f.confirm) { setError("兩次輸入密碼不一致"); doShake(); return; }
     const d = Number(f.feeDiscount);
     if (isNaN(d) || d <= 0 || d > 1) { setError("折數請輸入 0.01 ~ 1.00"); doShake(); return; }
-    const users = getUsers();
-    if (users.find((u) => u.username === f.username.trim())) { setError("此帳號名稱已被使用"); doShake(); return; }
-    const nu = { id: `u${Date.now()}`, username: f.username.trim(), password: f.password, displayName: f.display.trim(), broker: f.broker, feeDiscount: d };
-    saveUsers([...users, nu]);
-    const sess = { id: nu.id, username: nu.username, displayName: nu.displayName, broker: f.broker, feeDiscount: d };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(sess)); onLogin(sess);
+    setLoading(true);
+    try {
+      const existing = await supa(`users?username=eq.${encodeURIComponent(f.username.trim())}&select=id`);
+      if (existing?.length > 0) { setError("此帳號名稱已被使用"); doShake(); setLoading(false); return; }
+      const uid = `u${Date.now()}`;
+      await supa("users", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: JSON.stringify({ id: uid, username: f.username.trim(), password_hash: simpleHash(f.password), display_name: f.display.trim(), broker: f.broker, fee_discount: d }),
+      });
+      const sess = { id: uid, username: f.username.trim(), displayName: f.display.trim(), broker: f.broker, feeDiscount: d };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+      onLogin(sess);
+    } catch (e) {
+      setError("註冊失敗：" + e.message); doShake();
+    }
+    setLoading(false);
   };
 
   const prevFee = !isNaN(Number(f.feeDiscount))
@@ -306,7 +313,7 @@ function AuthScreen({ onLogin }) {
         .ai{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:11px 14px;font-size:14px;font-family:inherit;outline:none;width:100%;transition:border-color .15s}
         .ai:focus{border-color:#58a6ff;box-shadow:0 0 0 3px #58a6ff18}
         .ab{width:100%;padding:12px;border:none;border-radius:8px;font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;background:#238636;color:#fff;transition:background .15s}
-        .ab:hover{background:#2ea043}
+        .ab:hover{background:#2ea043}.ab:disabled{opacity:.5;cursor:not-allowed}
         @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
         .shake{animation:shake .4s ease}
         @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
@@ -328,13 +335,10 @@ function AuthScreen({ onLogin }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {tab === "register" && (
-            <>
-              <div>
-                <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>顯示名稱 *</label>
-                <input className="ai" placeholder="例：小明" value={f.display} onChange={(e) => set("display", e.target.value)} />
-              </div>
-              <hr style={{ border: "none", borderTop: "1px solid #21262d" }} />
-            </>
+            <div>
+              <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>顯示名稱 *</label>
+              <input className="ai" placeholder="例：小明" value={f.display} onChange={(e) => set("display", e.target.value)} />
+            </div>
           )}
           <div>
             <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>帳號 *</label>
@@ -350,7 +354,6 @@ function AuthScreen({ onLogin }) {
                 <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>確認密碼 *</label>
                 <input className="ai" type="password" placeholder="再輸入一次" value={f.confirm} onChange={(e) => set("confirm", e.target.value)} />
               </div>
-              <hr style={{ border: "none", borderTop: "1px solid #21262d" }} />
               <div style={{ background: "#0d1117", borderRadius: 10, padding: 16, border: "1px solid #21262d" }}>
                 <div style={{ fontSize: 12, color: "#58a6ff", fontWeight: 600, marginBottom: 12 }}>🏦 券商手續費設定</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -372,15 +375,10 @@ function AuthScreen({ onLogin }) {
               </div>
             </>
           )}
-          {error && (
-            <div style={{ background: "#3a1a1a", border: "1px solid #f8514940", borderRadius: 6, padding: "9px 13px", fontSize: 13, color: "#f85149" }}>⚠️ {error}</div>
-          )}
-          <button className="ab" onClick={tab === "login" ? doLogin : doRegister}>
-            {tab === "login" ? "登入" : "建立帳號"}
+          {error && <div style={{ background: "#3a1a1a", border: "1px solid #f8514940", borderRadius: 6, padding: "9px 13px", fontSize: 13, color: "#f85149" }}>⚠️ {error}</div>}
+          <button className="ab" disabled={loading} onClick={tab === "login" ? doLogin : doRegister}>
+            {loading ? "處理中…" : tab === "login" ? "登入" : "建立帳號"}
           </button>
-        </div>
-        <div style={{ marginTop: 20, padding: "10px 14px", background: "#0d1117", borderRadius: 8, fontSize: 12, color: "#484f58" }}>
-          💡 預設帳號：<span style={{ color: "#8b949e", fontFamily: "monospace" }}>admin</span>　密碼：<span style={{ color: "#8b949e", fontFamily: "monospace" }}>admin123</span>
         </div>
       </div>
     </div>
@@ -397,11 +395,8 @@ export default function App() {
   const uid = currentUser?.id;
   const feeDiscount = currentUser?.feeDiscount ?? 0.85;
 
-  const [trades, setTrades] = useState(() => {
-    if (!uid) return [];
-    try { const s = localStorage.getItem(TRADES_KEY(uid)); return s ? JSON.parse(s) : (uid === "u1" ? INIT_TRADES : []); }
-    catch { return []; }
-  });
+  const [trades, setTrades] = useState([]);
+  const [tradesLoading, setTradesLoading] = useState(false);
 
   const [livePrices, setLivePrices]   = useState({});
   const [priceLoading, setPriceLoading] = useState(false);
@@ -424,22 +419,35 @@ export default function App() {
   const [selectedYear, setYear]     = useState("all");
   const [importError, setImportError] = useState("");
 
-  // ── 區間損益 state ──
   const today = new Date().toISOString().slice(0, 10);
-  const firstDay = trades.length > 0
-    ? [...trades].sort((a, b) => a.date.localeCompare(b.date))[0].date
-    : today;
-  const [rangeStart, setRangeStart] = useState(firstDay);
+  const [rangeStart, setRangeStart] = useState(today.slice(0, 4) + "-01-01");
   const [rangeEnd,   setRangeEnd]   = useState(today);
 
-  const emptyForm = () => ({
-    date: new Date().toISOString().slice(0, 10), stock: "", name: "", type: "buy", qty: "", price: "", fee: "", tax: "",
-  });
+  const emptyForm = () => ({ date: today, stock: "", name: "", type: "buy", qty: "", price: "", fee: "", tax: "" });
   const [form, setForm]             = useState(emptyForm());
   const [stockLookup, setStockLookup] = useState({ loading: false, error: "" });
 
   const fileInputRef = useRef();
   const autoRefreshTimer = useRef(null);
+
+  // ── Load trades from Supabase ──
+  const loadTrades = useCallback(async () => {
+    if (!uid) return;
+    setTradesLoading(true);
+    try {
+      const rows = await supa(`trades?user_id=eq.${uid}&order=date.desc&select=*`);
+      setTrades((rows || []).map((r) => ({
+        id: r.id, date: r.date, stock: r.stock, name: r.name,
+        type: r.type, qty: Number(r.qty), price: Number(r.price),
+        fee: Number(r.fee), tax: Number(r.tax),
+      })));
+    } catch (e) {
+      notify("載入資料失敗：" + e.message, "error");
+    }
+    setTradesLoading(false);
+  }, [uid]);
+
+  useEffect(() => { if (uid) loadTrades(); }, [uid]);
 
   const heldCodes = useMemo(() => [...new Set(trades.map((t) => t.stock))], [trades]);
 
@@ -470,19 +478,13 @@ export default function App() {
     return () => clearInterval(autoRefreshTimer.current);
   }, [uid, heldCodes.join(",")]); // eslint-disable-line
 
-  useEffect(() => { if (uid) localStorage.setItem(TRADES_KEY(uid), JSON.stringify(trades)); }, [trades, uid]);
-
   const notify = (msg, type = "success") => { setNotif({ msg, type }); setTimeout(() => setNotif(null), 4000); };
 
   const lookupStock = useCallback((code) => {
     if (!code) return;
     const name = lookupNameByCode(code);
-    if (name) {
-      setForm((f) => ({ ...f, name }));
-      setStockLookup({ loading: false, error: "" });
-    } else if (code.length >= 2) {
-      setStockLookup({ loading: false, error: "代號不在資料庫，請手動輸入名稱" });
-    }
+    if (name) { setForm((f) => ({ ...f, name })); setStockLookup({ loading: false, error: "" }); }
+    else if (code.length >= 2) { setStockLookup({ loading: false, error: "代號不在資料庫，請手動輸入名稱" }); }
   }, []);
 
   // ── Portfolio calc ──
@@ -510,17 +512,7 @@ export default function App() {
       const unreal   = mktVal - p.cost;
       const dbName   = lookupNameByCode(p.stock);
       const dispName = (p.name && p.name !== p.stock) ? p.name : (dbName || p.stock);
-      return {
-        ...p,
-        name: dispName,
-        avgCost, curPrice: cur, mktVal,
-        unrealizedPnl: unreal,
-        unrealizedPct: p.cost > 0 ? (unreal / p.cost) * 100 : 0,
-        hasLivePrice:  !!liveData,
-        changePct:     liveData?.changePct ?? null,
-        currency:      liveData?.currency  ?? "TWD",
-        marketState:   liveData?.marketState ?? "CLOSED",
-      };
+      return { ...p, name: dispName, avgCost, curPrice: cur, mktVal, unrealizedPnl: unreal, unrealizedPct: p.cost > 0 ? (unreal / p.cost) * 100 : 0, hasLivePrice: !!liveData, changePct: liveData?.changePct ?? null, currency: liveData?.currency ?? "TWD", marketState: liveData?.marketState ?? "CLOSED" };
     });
   }, [trades, livePrices]);
 
@@ -546,37 +538,29 @@ export default function App() {
     return tC === 0 ? 0 : totalUnrealized * (cY / tC);
   }, [trades, selectedYear, totalUnrealized]);
 
-  // ── 區間損益計算 ──
+  // ── 區間損益 ──
   const rangeStats = useMemo(() => {
     if (!rangeStart || !rangeEnd) return null;
     const inRange = (d) => d >= rangeStart && d <= rangeEnd;
-
-    // 已實現：區間內賣出的損益
     let realized = 0;
     const stockMap = {};
     trades.forEach((t) => {
       if (!stockMap[t.stock]) stockMap[t.stock] = { qty: 0, cost: 0 };
       const sm = stockMap[t.stock];
-      if (t.type === "buy") {
-        sm.cost += t.qty * t.price + (t.fee || 0);
-        sm.qty  += t.qty;
-      } else {
+      if (t.type === "buy") { sm.cost += t.qty * t.price + (t.fee || 0); sm.qty += t.qty; }
+      else {
         const avg = sm.qty > 0 ? sm.cost / sm.qty : 0;
         const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
         if (inRange(t.date)) realized += pnl;
-        sm.cost -= avg * t.qty;
-        sm.qty  -= t.qty;
+        sm.cost -= avg * t.qty; sm.qty -= t.qty;
       }
     });
-
-    // 未實現：區間內買入的股票，以現價計算
     const buyInRange = {};
     trades.filter((t) => t.type === "buy" && inRange(t.date)).forEach((t) => {
       if (!buyInRange[t.stock]) buyInRange[t.stock] = { qty: 0, cost: 0, name: t.name };
       buyInRange[t.stock].qty  += t.qty;
       buyInRange[t.stock].cost += t.qty * t.price + (t.fee || 0);
     });
-    // 扣掉在此買入後又賣掉的部分
     trades.filter((t) => t.type === "sell").forEach((t) => {
       if (buyInRange[t.stock]) {
         const sm = buyInRange[t.stock];
@@ -586,73 +570,73 @@ export default function App() {
         if (sm.qty < 0) sm.qty = 0;
       }
     });
-
     let unrealCost = 0, unrealMkt = 0;
-    const unrealRows = Object.entries(buyInRange)
-      .filter(([, v]) => v.qty > 0)
-      .map(([code, v]) => {
-        const lp = livePrices[code];
-        const cur = lp ? lp.price : (v.cost / v.qty);
-        const mkt = v.qty * cur;
-        const pnl = mkt - v.cost;
-        const pct = v.cost > 0 ? (pnl / v.cost) * 100 : 0;
-        unrealCost += v.cost;
-        unrealMkt  += mkt;
-        const dbName = lookupNameByCode(code);
-        return { code, name: (v.name && v.name !== code) ? v.name : (dbName || code), qty: v.qty, cost: v.cost, mkt, pnl, pct, hasLive: !!lp };
-      });
-
+    const unrealRows = Object.entries(buyInRange).filter(([, v]) => v.qty > 0).map(([code, v]) => {
+      const lp = livePrices[code];
+      const cur = lp ? lp.price : (v.cost / v.qty);
+      const mkt = v.qty * cur;
+      const pnl = mkt - v.cost;
+      const pct = v.cost > 0 ? (pnl / v.cost) * 100 : 0;
+      unrealCost += v.cost; unrealMkt += mkt;
+      const dbName = lookupNameByCode(code);
+      return { code, name: (v.name && v.name !== code) ? v.name : (dbName || code), qty: v.qty, cost: v.cost, mkt, pnl, pct, hasLive: !!lp };
+    });
     const unrealized = unrealMkt - unrealCost;
     const unrealPct  = unrealCost > 0 ? (unrealized / unrealCost) * 100 : 0;
-    const realPct    = 0; // realized % needs total invested in period
-
     return { realized, unrealized, unrealPct, unrealRows, unrealCost };
   }, [trades, rangeStart, rangeEnd, livePrices]);
 
-  // ── 計算每筆賣出的損益（用於交易明細）──
+  // ── 賣出損益 ──
   const tradesWithPnl = useMemo(() => {
     const stockMap = {};
-    return trades
-      .slice()
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map((t) => {
-        if (!stockMap[t.stock]) stockMap[t.stock] = { qty: 0, cost: 0 };
-        const sm = stockMap[t.stock];
-        if (t.type === "buy") {
-          sm.cost += t.qty * t.price + (t.fee || 0);
-          sm.qty  += t.qty;
-          return { ...t, sellPnl: null, sellPct: null };
-        } else {
-          const avg = sm.qty > 0 ? sm.cost / sm.qty : 0;
-          const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
-          const pct = avg > 0 ? ((t.price - avg) / avg) * 100 : 0;
-          sm.cost -= avg * Math.min(t.qty, sm.qty);
-          sm.qty  -= Math.min(t.qty, sm.qty);
-          if (sm.qty < 0) sm.qty = 0;
-          return { ...t, sellPnl: pnl, sellPct: pct };
-        }
-      });
+    return trades.slice().sort((a, b) => a.date.localeCompare(b.date)).map((t) => {
+      if (!stockMap[t.stock]) stockMap[t.stock] = { qty: 0, cost: 0 };
+      const sm = stockMap[t.stock];
+      if (t.type === "buy") { sm.cost += t.qty * t.price + (t.fee || 0); sm.qty += t.qty; return { ...t, sellPnl: null, sellPct: null }; }
+      else {
+        const avg = sm.qty > 0 ? sm.cost / sm.qty : 0;
+        const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
+        const pct = avg > 0 ? ((t.price - avg) / avg) * 100 : 0;
+        sm.cost -= avg * Math.min(t.qty, sm.qty); sm.qty -= Math.min(t.qty, sm.qty);
+        if (sm.qty < 0) sm.qty = 0;
+        return { ...t, sellPnl: pnl, sellPct: pct };
+      }
+    });
   }, [trades]);
 
-  // ── Trade form submit ──
-  const submitTrade = () => {
+  // ── Trade CRUD ──
+  const submitTrade = async () => {
     if (!form.stock || !form.qty || !form.price) { notify("請填入必要欄位", "error"); return; }
     const fee = form.fee !== "" ? Number(form.fee) : calcFee(Number(form.qty), Number(form.price), feeDiscount);
-    const t   = { ...form, qty: Number(form.qty), price: Number(form.price), fee, tax: Number(form.tax || 0), id: editTrade?.id || Date.now() };
-    if (editTrade) { setTrades((p) => p.map((x) => x.id === editTrade.id ? t : x)); notify("已更新"); }
-    else           { setTrades((p) => [...p, t]); notify("已新增 ✓"); }
+    const t   = { ...form, qty: Number(form.qty), price: Number(form.price), fee, tax: Number(form.tax || 0) };
+    try {
+      if (editTrade) {
+        await supa(`trades?id=eq.${editTrade.id}`, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify({ ...t, user_id: uid }) });
+        notify("已更新");
+      } else {
+        const id = Date.now();
+        await supa("trades", { method: "POST", prefer: "return=minimal", body: JSON.stringify({ ...t, id, user_id: uid }) });
+        notify("已新增 ✓");
+      }
+      await loadTrades();
+    } catch (e) { notify("儲存失敗：" + e.message, "error"); return; }
     setShowForm(false); setEditTrade(null); setForm(emptyForm()); setStockLookup({ loading: false, error: "" });
   };
 
-  const deleteTrade = (id) => { setTrades((p) => p.filter((t) => t.id !== id)); notify("已刪除"); };
-  const openEdit    = (t)  => { setEditTrade(t); setForm({ ...t, fee: t.fee ?? "" }); setShowForm(true); };
+  const deleteTrade = async (id) => {
+    try {
+      await supa(`trades?id=eq.${id}`, { method: "DELETE" });
+      setTrades((p) => p.filter((t) => t.id !== id));
+      notify("已刪除");
+    } catch (e) { notify("刪除失敗：" + e.message, "error"); }
+  };
+
+  const openEdit = (t) => { setEditTrade(t); setForm({ ...t, fee: t.fee ?? "" }); setShowForm(true); };
 
   const exportCsv = () => {
     const blob = new Blob(["\uFEFF" + tradesToCsv(trades)], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `台股交易記錄_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `台股交易記錄_${today}.csv`; a.click();
   };
 
   const importFile = (e) => {
@@ -660,37 +644,33 @@ export default function App() {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     let total = 0; const errors = [];
-
-    const processRows = (rows, filename) => {
+    const processRows = async (rows, filename) => {
       try {
         const imported = rowsToTrades(rows, filename);
-        setTrades((p) => {
-          const existing = new Set(p.map((t) => `${t.date}|${t.stock}|${t.qty}|${t.price}|${t.type}`));
-          const fresh    = imported.filter((t) => !existing.has(`${t.date}|${t.stock}|${t.qty}|${t.price}|${t.type}`));
-          total += fresh.length;
-          return [...p, ...fresh];
-        });
+        const existing = new Set(trades.map((t) => `${t.date}|${t.stock}|${t.qty}|${t.price}|${t.type}`));
+        const fresh = imported.filter((t) => !existing.has(`${t.date}|${t.stock}|${t.qty}|${t.price}|${t.type}`));
+        for (const t of fresh) {
+          await supa("trades", { method: "POST", prefer: "return=minimal", body: JSON.stringify({ ...t, id: Date.now() + Math.random() * 1000 | 0, user_id: uid }) });
+          total++;
+        }
       } catch (err) { errors.push(err.message); }
     };
-
     const readFile = (file) => new Promise((resolve) => {
       const isExcel = /\.(xlsx|xls|xlsm|ods)$/i.test(file.name);
       const reader  = new FileReader();
       if (isExcel) {
-        reader.onload  = (ev) => { try { processRows(xlsxBufToRows(new Uint8Array(ev.target.result)), file.name); } catch (err) { errors.push(`「${file.name}」Excel 讀取失敗：${err.message}`); } resolve(); };
-        reader.onerror = () => { errors.push(`讀取「${file.name}」失敗`); resolve(); };
+        reader.onload  = async (ev) => { try { await processRows(xlsxBufToRows(new Uint8Array(ev.target.result)), file.name); } catch (err) { errors.push(`「${file.name}」Excel 讀取失敗`); } resolve(); };
         reader.readAsArrayBuffer(file);
       } else {
-        reader.onload  = (ev) => { try { let t = ev.target.result; if (t.charCodeAt(0) === 0xFEFF) t = t.slice(1); processRows(csvTextToRows(t), file.name); } catch (err) { errors.push(err.message); } resolve(); };
-        reader.onerror = () => { errors.push(`讀取「${file.name}」失敗`); resolve(); };
+        reader.onload  = async (ev) => { try { let t = ev.target.result; if (t.charCodeAt(0) === 0xFEFF) t = t.slice(1); await processRows(csvTextToRows(t), file.name); } catch (err) { errors.push(err.message); } resolve(); };
         reader.readAsText(file, "UTF-8");
       }
     });
-
-    Promise.all(files.map(readFile)).then(() => {
+    Promise.all(files.map(readFile)).then(async () => {
+      await loadTrades();
       if (total > 0) notify(`✓ 成功匯入 ${total} 筆交易`);
       if (errors.length) setImportError(errors.join(" ／ "));
-      else if (total === 0) setImportError("沒有新資料被匯入（可能全部重複或格式不符）");
+      else if (total === 0) setImportError("沒有新資料被匯入");
     });
     e.target.value = "";
   };
@@ -699,35 +679,32 @@ export default function App() {
     setSf({ broker: currentUser.broker || "其他", feeDiscount: currentUser.feeDiscount ?? 0.85, oldPw: "", newPw: "", confirmPw: "" });
     setSfErr(""); setStab("broker"); setSettings(true); setUserMenu(false);
   };
-  const saveBroker = () => {
+  const saveBroker = async () => {
     setSfErr(""); const d = Number(sf.feeDiscount);
     if (isNaN(d) || d <= 0 || d > 1) { setSfErr("折數請輸入 0.01 ~ 1.00"); return; }
-    saveUsers(getUsers().map((u) => u.id === uid ? { ...u, broker: sf.broker, feeDiscount: d } : u));
-    const upd = { ...currentUser, broker: sf.broker, feeDiscount: d };
-    setCurrentUser(upd); localStorage.setItem(SESSION_KEY, JSON.stringify(upd));
-    notify("券商設定已更新 ✓"); setSettings(false);
+    try {
+      await supa(`users?id=eq.${uid}`, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify({ broker: sf.broker, fee_discount: d }) });
+      const upd = { ...currentUser, broker: sf.broker, feeDiscount: d };
+      setCurrentUser(upd); localStorage.setItem(SESSION_KEY, JSON.stringify(upd));
+      notify("券商設定已更新 ✓"); setSettings(false);
+    } catch (e) { setSfErr("儲存失敗：" + e.message); }
   };
-  const changePw = () => {
+  const changePw = async () => {
     setSfErr("");
     if (!sf.oldPw || !sf.newPw || !sf.confirmPw) { setSfErr("請填入所有欄位"); return; }
     if (sf.newPw.length < 6) { setSfErr("新密碼至少需要 6 個字元"); return; }
     if (sf.newPw !== sf.confirmPw) { setSfErr("兩次密碼不一致"); return; }
-    const users = getUsers(), user = users.find((u) => u.id === uid);
-    if (!user || simpleHash(sf.oldPw) !== simpleHash(user.password)) { setSfErr("舊密碼不正確"); return; }
-    saveUsers(users.map((u) => u.id === uid ? { ...u, password: sf.newPw } : u));
-    notify("密碼已更新 ✓"); setSettings(false);
+    try {
+      const rows = await supa(`users?id=eq.${uid}&select=password_hash`);
+      if (!rows?.[0] || rows[0].password_hash !== simpleHash(sf.oldPw)) { setSfErr("舊密碼不正確"); return; }
+      await supa(`users?id=eq.${uid}`, { method: "PATCH", prefer: "return=minimal", body: JSON.stringify({ password_hash: simpleHash(sf.newPw) }) });
+      notify("密碼已更新 ✓"); setSettings(false);
+    } catch (e) { setSfErr("更新失敗：" + e.message); }
   };
   const handleLogout = () => { localStorage.removeItem(SESSION_KEY); setCurrentUser(null); setUserMenu(false); };
 
   if (!currentUser) {
-    return (
-      <AuthScreen onLogin={(u) => {
-        setCurrentUser(u);
-        try { const s = localStorage.getItem(TRADES_KEY(u.id)); setTrades(s ? JSON.parse(s) : (u.id === "u1" ? INIT_TRADES : [])); }
-        catch { setTrades([]); }
-        setView("portfolio");
-      }} />
-    );
+    return <AuthScreen onLogin={(u) => { setCurrentUser(u); setView("portfolio"); }} />;
   }
 
   const filteredTrades = [...tradesWithPnl]
@@ -787,8 +764,6 @@ export default function App() {
         .yr-sel{background:#21262d;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;font-size:12px;font-family:inherit;outline:none;cursor:pointer}
         .pulse{animation:pulse 2s ease-in-out infinite}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-        .date-input{background:#21262d;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 10px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
-        .date-input:focus{border-color:#58a6ff}
         @media(max-width:640px){.g2{grid-template-columns:1fr}.hm{display:none}}
       `}</style>
 
@@ -828,13 +803,11 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 16px" }}>
-
-        {/* Info / Action Bar */}
+        {/* Action Bar */}
         <div style={{ background: "#161b22", border: "1px solid #21262d", borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 12, flexWrap: "wrap" }}>
           <span style={{ color: "#484f58" }}>手續費：</span>
           <span className="fb">🏦 {currentUser.broker || "未設定"}</span>
           <span className="fb">✂️ {Math.round(feeDiscount * 10)}折</span>
-
           {priceLoading
             ? <span className="fb pulse" style={{ background: "#1a2a3a", color: "#58a6ff", border: "1px solid #58a6ff40" }}><span className="spin" style={{ width: 10, height: 10, margin: "0 4px 0 0" }} />報價更新中…</span>
             : lastFetched
@@ -842,12 +815,8 @@ export default function App() {
               : <span className="fb" style={{ background: "#2a1a1a", color: "#f85149", border: "1px solid #f8514930" }}>⚠ 尚未取得報價</span>
           }
           {priceError && <span style={{ fontSize: 11, color: "#f85149" }}>⚠ {priceError}</span>}
-
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button className="btn"
-              style={{ background: "#388bfd22", color: "#58a6ff", border: "1px solid #58a6ff40", padding: "6px 12px", fontSize: 12, fontWeight: 600 }}
-              onClick={() => refreshPrices(false)}
-              disabled={priceLoading}>
+            <button className="btn" style={{ background: "#388bfd22", color: "#58a6ff", border: "1px solid #58a6ff40", padding: "6px 12px", fontSize: 12, fontWeight: 600 }} onClick={() => refreshPrices(false)} disabled={priceLoading}>
               {priceLoading ? "⏳ 更新中" : "🔄 更新報價"}
             </button>
             <button className="btn btn-b" onClick={exportCsv}>⬇ 匯出紀錄</button>
@@ -867,10 +836,10 @@ export default function App() {
         {/* Summary Cards */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12, marginBottom: 24 }}>
           {[
-            { label: "市值合計",         value: `$${fmtNum(totalMktVal)}`,           sub: "新台幣" },
-            { label: "持股成本",         value: `$${fmtNum(totalCost)}`,             sub: "含手續費" },
+            { label: "市值合計", value: `$${fmtNum(totalMktVal)}`, sub: "新台幣" },
+            { label: "持股成本", value: `$${fmtNum(totalCost)}`, sub: "含手續費" },
             { label: "未實現損益 (全部)", value: fmtMoney(Math.round(totalUnrealized)), sub: `${totalCost > 0 ? fmtMoney((totalUnrealized / totalCost * 100).toFixed(2)) : "0"}%`, pnl: totalUnrealized },
-            { label: "已實現損益 (全部)", value: fmtMoney(Math.round(totalRealized)),   sub: "歷史累計", pnl: totalRealized },
+            { label: "已實現損益 (全部)", value: fmtMoney(Math.round(totalRealized)), sub: "歷史累計", pnl: totalRealized },
           ].map((c, i) => (
             <div key={i} className="sc">
               <div style={{ fontSize: 10, color: "#484f58", marginBottom: 6, fontWeight: 500, textTransform: "uppercase", letterSpacing: "1px" }}>{c.label}</div>
@@ -880,16 +849,12 @@ export default function App() {
           ))}
           {[
             { label: "未實現損益", value: fmtMoney(Math.round(yearUnrealized)), pnl: yearUnrealized },
-            { label: "已實現損益", value: fmtMoney(Math.round(yearRealized)),   pnl: yearRealized },
+            { label: "已實現損益", value: fmtMoney(Math.round(yearRealized)), pnl: yearRealized },
           ].map((c, i) => (
             <div key={i} className="sc" style={{ border: "1px solid #2d4a6b" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                 <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, textTransform: "uppercase", letterSpacing: "1px" }}>{c.label}</div>
-                {i === 0 && (
-                  <select className="yr-sel" value={selectedYear} onChange={(e) => setYear(e.target.value)}>
-                    {years.map((y) => <option key={y} value={y}>{y === "all" ? "全部年度" : `${y} 年`}</option>)}
-                  </select>
-                )}
+                {i === 0 && <select className="yr-sel" value={selectedYear} onChange={(e) => setYear(e.target.value)}>{years.map((y) => <option key={y} value={y}>{y === "all" ? "全部年度" : `${y} 年`}</option>)}</select>}
                 {i === 1 && <span style={{ fontSize: 11, color: "#58a6ff" }}>{selectedYear === "all" ? "全部" : `${selectedYear} 年`}</span>}
               </div>
               <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: c.pnl >= 0 ? "#3fb950" : "#f85149" }}>{c.value}</div>
@@ -898,8 +863,10 @@ export default function App() {
           ))}
         </div>
 
+        {tradesLoading && <div style={{ textAlign: "center", padding: 40, color: "#484f58" }}><span className="spin" style={{ width: 24, height: 24, borderWidth: 3 }} /></div>}
+
         {/* Portfolio View */}
-        {view === "portfolio" && (
+        {!tradesLoading && view === "portfolio" && (
           <div className="card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 10 }}>
               <h2 style={{ fontSize: 15, fontWeight: 600 }}>持倉明細</h2>
@@ -910,66 +877,21 @@ export default function App() {
               : (
                 <div style={{ overflowX: "auto" }}>
                   <table className="tbl">
-                    <thead>
-                      <tr>
-                        <th>股票</th><th>持股數</th><th>均成本</th>
-                        <th>現價 <span style={{ fontSize: 10, color: "#484f58", fontWeight: 400 }}>（Yahoo Finance）</span></th>
-                        <th>今日漲跌</th><th>市值</th><th>未實現損益</th><th>損益%</th><th>已實現</th>
-                      </tr>
-                    </thead>
+                    <thead><tr><th>股票</th><th>持股數</th><th>均成本</th><th>現價</th><th>今日漲跌</th><th>市值</th><th>未實現損益</th><th>損益%</th><th>已實現</th></tr></thead>
                     <tbody>
                       {portfolio.filter((p) => p.qty > 0).map((p) => {
-                        const hasPx  = p.hasLivePrice;
-                        const diff   = hasPx ? p.curPrice - p.avgCost : 0;
-                        const chgPct = p.changePct;
-                        const isTW   = !p.currency || p.currency === "TWD";
+                        const hasPx = p.hasLivePrice; const diff = hasPx ? p.curPrice - p.avgCost : 0; const isTW = !p.currency || p.currency === "TWD";
                         return (
                           <tr key={p.stock}>
-                            <td>
-                              <div style={{ fontWeight: 600 }}>{p.stock}</div>
-                              <div style={{ fontSize: 11, color: "#8b949e" }}>{p.name}</div>
-                              {hasPx && (
-                                <div style={{ fontSize: 10, color: "#484f58" }}>
-                                  {p.marketState === "REGULAR" ? "🟢 交易中" : p.marketState === "PRE" ? "🌅 盤前" : p.marketState === "POST" ? "🌙 盤後" : "⚫ 收盤"}
-                                </div>
-                              )}
-                            </td>
+                            <td><div style={{ fontWeight: 600 }}>{p.stock}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{p.name}</div>{hasPx && <div style={{ fontSize: 10, color: "#484f58" }}>{p.marketState === "REGULAR" ? "🟢 交易中" : p.marketState === "PRE" ? "🌅 盤前" : p.marketState === "POST" ? "🌙 盤後" : "⚫ 收盤"}</div>}</td>
                             <td className="mono">{fmtNum(p.qty)}</td>
                             <td className="mono">{fmtNum(p.avgCost, 2)}</td>
-                            <td>
-                              {hasPx
-                                ? (
-                                  <>
-                                    <div className="mono" style={{ fontWeight: 700, color: diff >= 0 ? "#3fb950" : "#f85149" }}>
-                                      {isTW ? "" : "$"}{fmtNum(p.curPrice, 2)}{isTW ? "" : " USD"}
-                                    </div>
-                                    <div style={{ fontSize: 10, color: diff >= 0 ? "#3fb95099" : "#f8514999", fontFamily: "monospace" }}>
-                                      {diff >= 0 ? "+" : ""}{fmtNum(diff, 2)} vs 均成本
-                                    </div>
-                                  </>
-                                )
-                                : <span style={{ color: "#484f58", fontSize: 12 }}>{priceLoading ? <span className="spin" /> : "—"}</span>
-                              }
-                            </td>
-                            <td>
-                              {hasPx && chgPct != null
-                                ? <span className="bdg" style={{ background: chgPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: chgPct >= 0 ? "#3fb950" : "#f85149" }}>
-                                  {chgPct >= 0 ? "▲" : "▼"} {Math.abs(chgPct).toFixed(2)}%
-                                </span>
-                                : <span style={{ color: "#484f58" }}>—</span>
-                              }
-                            </td>
+                            <td>{hasPx ? <><div className="mono" style={{ fontWeight: 700, color: diff >= 0 ? "#3fb950" : "#f85149" }}>{isTW ? "" : "$"}{fmtNum(p.curPrice, 2)}{isTW ? "" : " USD"}</div><div style={{ fontSize: 10, color: diff >= 0 ? "#3fb95099" : "#f8514999", fontFamily: "monospace" }}>{diff >= 0 ? "+" : ""}{fmtNum(diff, 2)} vs 均成本</div></> : <span style={{ color: "#484f58", fontSize: 12 }}>{priceLoading ? <span className="spin" /> : "—"}</span>}</td>
+                            <td>{hasPx && p.changePct != null ? <span className="bdg" style={{ background: p.changePct >= 0 ? "#1a3a2a" : "#3a1a1a", color: p.changePct >= 0 ? "#3fb950" : "#f85149" }}>{p.changePct >= 0 ? "▲" : "▼"} {Math.abs(p.changePct).toFixed(2)}%</span> : <span style={{ color: "#484f58" }}>—</span>}</td>
                             <td className="mono">{hasPx ? fmtNum(p.mktVal) : <span style={{ color: "#484f58" }}>—</span>}</td>
                             <td className={`mono ${p.unrealizedPnl >= 0 ? "pp" : "pn"}`}>{hasPx ? fmtMoney(Math.round(p.unrealizedPnl)) : <span style={{ color: "#484f58" }}>—</span>}</td>
-                            <td className={p.unrealizedPct >= 0 ? "pp" : "pn"}>
-                              {hasPx
-                                ? <span className="bdg" style={{ background: p.unrealizedPct >= 0 ? "#1a3a2a" : "#3a1a1a" }}>{fmtMoney(p.unrealizedPct.toFixed(2))}%</span>
-                                : <span style={{ color: "#484f58" }}>—</span>
-                              }
-                            </td>
-                            <td className={`mono ${p.realizedPnl > 0 ? "pp" : p.realizedPnl < 0 ? "pn" : "pz"}`}>
-                              {p.realizedPnl !== 0 ? fmtMoney(Math.round(p.realizedPnl)) : "—"}
-                            </td>
+                            <td>{hasPx ? <span className="bdg" style={{ background: p.unrealizedPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: p.unrealizedPct >= 0 ? "#3fb950" : "#f85149" }}>{fmtMoney(p.unrealizedPct.toFixed(2))}%</span> : <span style={{ color: "#484f58" }}>—</span>}</td>
+                            <td className={`mono ${p.realizedPnl > 0 ? "pp" : p.realizedPnl < 0 ? "pn" : "pz"}`}>{p.realizedPnl !== 0 ? fmtMoney(Math.round(p.realizedPnl)) : "—"}</td>
                           </tr>
                         );
                       })}
@@ -981,21 +903,17 @@ export default function App() {
         )}
 
         {/* History View */}
-        {view === "history" && (() => {
+        {!tradesLoading && view === "history" && (() => {
           const allStock = [...new Set(trades.map((t) => t.stock))];
           const stockSummary = allStock.map((code) => {
             const related = trades.filter((t) => t.stock === code);
-            const name    = portfolio.find((p) => p.stock === code)?.name || lookupNameByCode(code) || code;
+            const name = portfolio.find((p) => p.stock === code)?.name || lookupNameByCode(code) || code;
             let qty = 0, cost = 0, realized = 0;
             related.forEach((t) => {
               if (t.type === "buy") { cost += t.qty * t.price + (t.fee || 0); qty += t.qty; }
-              else {
-                const avg = qty > 0 ? cost / qty : 0;
-                const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
-                realized += pnl; cost -= avg * t.qty; qty -= t.qty;
-              }
+              else { const avg = qty > 0 ? cost / qty : 0; const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty; realized += pnl; cost -= avg * t.qty; qty -= t.qty; }
             });
-            const totalBuy  = related.filter((t) => t.type === "buy").reduce((s, t)  => s + t.qty * t.price + (t.fee || 0), 0);
+            const totalBuy  = related.filter((t) => t.type === "buy").reduce((s, t) => s + t.qty * t.price + (t.fee || 0), 0);
             const totalSell = related.filter((t) => t.type === "sell").reduce((s, t) => s + t.qty * t.price - (t.fee || 0) - (t.tax || 0), 0);
             return { code, name, isHeld: qty > 0, qty, realized, totalBuy, totalSell };
           }).filter((s) => s.realized !== 0 || s.totalSell > 0);
@@ -1006,11 +924,10 @@ export default function App() {
             const yr = (t.date || "").slice(0, 4); if (!yr) return;
             if (!yearMap[yr]) yearMap[yr] = { year: yr, realized: 0, sells: 0 };
             const relBuys = trades.filter((x) => x.stock === t.stock && x.type === "buy" && x.date <= t.date);
-            let q = 0, c = 0;
-            relBuys.forEach((x) => { c += x.qty * x.price + (x.fee || 0); q += x.qty; });
+            let q = 0, c = 0; relBuys.forEach((x) => { c += x.qty * x.price + (x.fee || 0); q += x.qty; });
             const avg = q > 0 ? c / q : 0;
-            const pnl = t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
-            yearMap[yr].realized += pnl; yearMap[yr].sells++;
+            yearMap[yr].realized += t.qty * t.price - (t.fee || 0) - (t.tax || 0) - avg * t.qty;
+            yearMap[yr].sells++;
           });
           const yearRows = Object.values(yearMap).sort((a, b) => b.year - a.year);
 
@@ -1018,66 +935,58 @@ export default function App() {
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               <div className="card">
                 <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 14 }}>📅 歷年已實現損益</h2>
-                {yearRows.length === 0
-                  ? <div className="emp">尚無已實現損益資料</div>
-                  : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table className="tbl">
-                        <thead><tr><th>年度</th><th>賣出筆數</th><th>已實現損益</th><th>獲利狀態</th></tr></thead>
-                        <tbody>
-                          {yearRows.map((r) => (
-                            <tr key={r.year}>
-                              <td style={{ fontWeight: 600 }}>{r.year} 年</td>
-                              <td className="mono pz">{r.sells} 筆</td>
-                              <td className={`mono ${r.realized >= 0 ? "pp" : "pn"}`} style={{ fontSize: 15, fontWeight: 700 }}>{fmtMoney(Math.round(r.realized))}</td>
-                              <td><span className="bdg" style={{ background: r.realized >= 0 ? "#1a3a2a" : "#3a1a1a", color: r.realized >= 0 ? "#3fb950" : "#f85149" }}>{r.realized >= 0 ? "獲利" : "虧損"}</span></td>
-                            </tr>
-                          ))}
-                          <tr style={{ borderTop: "2px solid #30363d" }}>
-                            <td style={{ fontWeight: 700 }}>合計</td>
-                            <td className="mono pz">{yearRows.reduce((s, r) => s + r.sells, 0)} 筆</td>
-                            <td className={`mono ${yearRows.reduce((s, r) => s + r.realized, 0) >= 0 ? "pp" : "pn"}`} style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(Math.round(yearRows.reduce((s, r) => s + r.realized, 0)))}</td>
-                            <td></td>
+                {yearRows.length === 0 ? <div className="emp">尚無已實現損益資料</div> : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table className="tbl">
+                      <thead><tr><th>年度</th><th>賣出筆數</th><th>已實現損益</th><th>獲利狀態</th></tr></thead>
+                      <tbody>
+                        {yearRows.map((r) => (
+                          <tr key={r.year}>
+                            <td style={{ fontWeight: 600 }}>{r.year} 年</td>
+                            <td className="mono pz">{r.sells} 筆</td>
+                            <td className={`mono ${r.realized >= 0 ? "pp" : "pn"}`} style={{ fontSize: 15, fontWeight: 700 }}>{fmtMoney(Math.round(r.realized))}</td>
+                            <td><span className="bdg" style={{ background: r.realized >= 0 ? "#1a3a2a" : "#3a1a1a", color: r.realized >= 0 ? "#3fb950" : "#f85149" }}>{r.realized >= 0 ? "獲利" : "虧損"}</span></td>
                           </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                        ))}
+                        <tr style={{ borderTop: "2px solid #30363d" }}>
+                          <td style={{ fontWeight: 700 }}>合計</td>
+                          <td className="mono pz">{yearRows.reduce((s, r) => s + r.sells, 0)} 筆</td>
+                          <td className={`mono ${yearRows.reduce((s, r) => s + r.realized, 0) >= 0 ? "pp" : "pn"}`} style={{ fontSize: 16, fontWeight: 700 }}>{fmtMoney(Math.round(yearRows.reduce((s, r) => s + r.realized, 0)))}</td>
+                          <td></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
               <div className="card">
                 <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 14 }}>📊 各股歷史績效</h2>
-                {stockSummary.length === 0
-                  ? <div className="emp">尚無交易歷史資料</div>
-                  : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table className="tbl">
-                        <thead><tr><th>股票</th><th>狀態</th><th>買入總額</th><th>賣出收回</th><th>已實現損益</th><th>報酬率</th></tr></thead>
-                        <tbody>
-                          {stockSummary.sort((a, b) => Math.abs(b.realized) - Math.abs(a.realized)).map((s) => (
-                            <tr key={s.code}>
-                              <td><div style={{ fontWeight: 600 }}>{s.code}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{s.name}</div></td>
-                              <td><span className="bdg" style={{ background: s.isHeld ? "#1a2a3a" : "#21262d", color: s.isHeld ? "#58a6ff" : "#8b949e" }}>{s.isHeld ? "持有中" : "已出清"}</span></td>
-                              <td className="mono pz">{fmtNum(Math.round(s.totalBuy))}</td>
-                              <td className="mono pz">{s.totalSell > 0 ? fmtNum(Math.round(s.totalSell)) : "—"}</td>
-                              <td className={`mono ${s.realized >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(s.realized))}</td>
-                              <td className={s.realized >= 0 ? "pp" : "pn"}>
-                                {s.totalBuy > 0
-                                  ? <span className="bdg" style={{ background: s.realized >= 0 ? "#1a3a2a" : "#3a1a1a" }}>{fmtMoney((s.realized / s.totalBuy * 100).toFixed(2))}%</span>
-                                  : "—"}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                {stockSummary.length === 0 ? <div className="emp">尚無交易歷史資料</div> : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table className="tbl">
+                      <thead><tr><th>股票</th><th>狀態</th><th>買入總額</th><th>賣出收回</th><th>已實現損益</th><th>報酬率</th></tr></thead>
+                      <tbody>
+                        {stockSummary.sort((a, b) => Math.abs(b.realized) - Math.abs(a.realized)).map((s) => (
+                          <tr key={s.code}>
+                            <td><div style={{ fontWeight: 600 }}>{s.code}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{s.name}</div></td>
+                            <td><span className="bdg" style={{ background: s.isHeld ? "#1a2a3a" : "#21262d", color: s.isHeld ? "#58a6ff" : "#8b949e" }}>{s.isHeld ? "持有中" : "已出清"}</span></td>
+                            <td className="mono pz">{fmtNum(Math.round(s.totalBuy))}</td>
+                            <td className="mono pz">{s.totalSell > 0 ? fmtNum(Math.round(s.totalSell)) : "—"}</td>
+                            <td className={`mono ${s.realized >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(s.realized))}</td>
+                            <td>{s.totalBuy > 0 ? <span className="bdg" style={{ background: s.realized >= 0 ? "#1a3a2a" : "#3a1a1a", color: s.realized >= 0 ? "#3fb950" : "#f85149" }}>{fmtMoney((s.realized / s.totalBuy * 100).toFixed(2))}%</span> : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
           );
         })()}
 
         {/* Trades View */}
-        {view === "trades" && (
+        {!tradesLoading && view === "trades" && (
           <div className="card">
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
               <h2 style={{ fontSize: 15, fontWeight: 600, flex: 1 }}>交易記錄</h2>
@@ -1087,131 +996,81 @@ export default function App() {
               </select>
               <button className="btn btn-p" onClick={() => { setEditTrade(null); setForm(emptyForm()); setStockLookup({ loading: false, error: "" }); setShowForm(true); }}>+ 新增</button>
             </div>
-            {filteredTrades.length === 0
-              ? <div className="emp">📭 無交易記錄</div>
-              : (
-                <div style={{ overflowX: "auto" }}>
-                  <table className="tbl">
-                    <thead>
-                      <tr>
-                        <th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th>
-                        <th>手續費＋稅</th><th>金額</th><th>損益（賣出）</th><th>操作</th>
+            {filteredTrades.length === 0 ? <div className="emp">📭 無交易記錄</div> : (
+              <div style={{ overflowX: "auto" }}>
+                <table className="tbl">
+                  <thead><tr><th>日期</th><th>股票</th><th>類型</th><th>數量</th><th>價格</th><th>手續費＋稅</th><th>金額</th><th>損益（賣出）</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {filteredTrades.map((t) => (
+                      <tr key={t.id}>
+                        <td style={{ color: "#8b949e" }}>{t.date}</td>
+                        <td><div style={{ fontWeight: 600 }}>{t.stock}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{t.name}</div></td>
+                        <td><span className={t.type === "buy" ? "tag-b" : "tag-s"}>{t.type === "buy" ? "買進" : "賣出"}</span></td>
+                        <td className="mono">{fmtNum(t.qty)}</td>
+                        <td className="mono">{fmtNum(t.price, 2)}</td>
+                        <td className="mono pz">{fmtNum((t.fee || 0) + (t.tax || 0))}</td>
+                        <td className="mono">{fmtNum(t.qty * t.price)}</td>
+                        <td>{t.type === "sell" && t.sellPnl !== null ? <div><div className={`mono ${t.sellPnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(t.sellPnl))}</div><span className="bdg" style={{ background: t.sellPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: t.sellPct >= 0 ? "#3fb950" : "#f85149" }}>{t.sellPct >= 0 ? "+" : ""}{t.sellPct.toFixed(2)}%</span></div> : <span style={{ color: "#484f58" }}>—</span>}</td>
+                        <td><div style={{ display: "flex", gap: 6 }}><button className="btn btn-g" onClick={() => openEdit(t)}>✏️</button><button className="btn btn-d" onClick={() => deleteTrade(t.id)}>✕</button></div></td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {filteredTrades.map((t) => (
-                        <tr key={t.id}>
-                          <td style={{ color: "#8b949e" }}>{t.date}</td>
-                          <td><div style={{ fontWeight: 600 }}>{t.stock}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{t.name}</div></td>
-                          <td><span className={t.type === "buy" ? "tag-b" : "tag-s"}>{t.type === "buy" ? "買進" : "賣出"}</span></td>
-                          <td className="mono">{fmtNum(t.qty)}</td>
-                          <td className="mono">{fmtNum(t.price, 2)}</td>
-                          <td className="mono pz">{fmtNum((t.fee || 0) + (t.tax || 0))}</td>
-                          <td className="mono">{fmtNum(t.qty * t.price)}</td>
-                          <td>
-                            {t.type === "sell" && t.sellPnl !== null ? (
-                              <div>
-                                <div className={`mono ${t.sellPnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>
-                                  {fmtMoney(Math.round(t.sellPnl))}
-                                </div>
-                                <div>
-                                  <span className="bdg" style={{ background: t.sellPct >= 0 ? "#1a3a2a" : "#3a1a1a", color: t.sellPct >= 0 ? "#3fb950" : "#f85149" }}>
-                                    {t.sellPct >= 0 ? "+" : ""}{t.sellPct.toFixed(2)}%
-                                  </span>
-                                </div>
-                              </div>
-                            ) : <span style={{ color: "#484f58" }}>—</span>}
-                          </td>
-                          <td>
-                            <div style={{ display: "flex", gap: 6 }}>
-                              <button className="btn btn-g" onClick={() => openEdit(t)}>✏️</button>
-                              <button className="btn btn-d" onClick={() => deleteTrade(t.id)}>✕</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Range PnL View */}
-        {view === "range" && (
+        {/* Range View */}
+        {!tradesLoading && view === "range" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* 日期選擇器 */}
             <div className="card">
               <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>📅 自訂區間損益</h2>
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 13, color: "#8b949e", whiteSpace: "nowrap" }}>開始日期</span>
-                  <input type="date" className="date-input" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} style={{ width: 160 }} />
+                  <input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} style={{ width: 160 }} />
                 </div>
                 <span style={{ color: "#484f58" }}>～</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 13, color: "#8b949e", whiteSpace: "nowrap" }}>結束日期</span>
-                  <input type="date" className="date-input" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} style={{ width: 160 }} />
+                  <input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} style={{ width: 160 }} />
                 </div>
                 <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { setRangeStart(today.slice(0, 4) + "-01-01"); setRangeEnd(today); }}>今年</button>
                 <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { const y = String(Number(today.slice(0, 4)) - 1); setRangeStart(y + "-01-01"); setRangeEnd(y + "-12-31"); }}>去年</button>
-                <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { setRangeStart(firstDay); setRangeEnd(today); }}>全部</button>
+                <button className="btn btn-g" style={{ fontSize: 12 }} onClick={() => { const d = trades.length > 0 ? [...trades].sort((a,b)=>a.date.localeCompare(b.date))[0].date : today; setRangeStart(d); setRangeEnd(today); }}>全部</button>
               </div>
             </div>
-
             {rangeStats && (
               <>
-                {/* 摘要卡片 */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
-                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
-                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間已實現損益</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: rangeStats.realized >= 0 ? "#3fb950" : "#f85149" }}>
-                      {fmtMoney(Math.round(rangeStats.realized))}
+                  {[
+                    { label: "區間已實現損益", value: fmtMoney(Math.round(rangeStats.realized)), sub: "區間內賣出已結算", pnl: rangeStats.realized },
+                    { label: "區間未實現損益", value: fmtMoney(Math.round(rangeStats.unrealized)), sub: `${fmtMoney(rangeStats.unrealPct.toFixed(2))}%　以現價計算`, pnl: rangeStats.unrealized },
+                    { label: "區間總損益", value: fmtMoney(Math.round(rangeStats.realized + rangeStats.unrealized)), sub: "已實現＋未實現合計", pnl: rangeStats.realized + rangeStats.unrealized },
+                  ].map((c, i) => (
+                    <div key={i} className="sc" style={{ border: "1px solid #2d4a6b" }}>
+                      <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>{c.label}</div>
+                      <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: c.pnl >= 0 ? "#3fb950" : "#f85149" }}>{c.value}</div>
+                      <div style={{ fontSize: 11, color: "#484f58", marginTop: 4 }}>{c.sub}</div>
                     </div>
-                    <div style={{ fontSize: 11, color: "#484f58", marginTop: 4 }}>區間內賣出已結算</div>
-                  </div>
-                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
-                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間未實現損益</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: rangeStats.unrealized >= 0 ? "#3fb950" : "#f85149" }}>
-                      {fmtMoney(Math.round(rangeStats.unrealized))}
-                    </div>
-                    <div style={{ fontSize: 11, color: rangeStats.unrealPct >= 0 ? "#3fb95099" : "#f8514999", marginTop: 4 }}>
-                      {fmtMoney(rangeStats.unrealPct.toFixed(2))}%　以現價計算
-                    </div>
-                  </div>
-                  <div className="sc" style={{ border: "1px solid #2d4a6b" }}>
-                    <div style={{ fontSize: 10, color: "#58a6ff", fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "1px" }}>區間總損益</div>
-                    <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "monospace", color: (rangeStats.realized + rangeStats.unrealized) >= 0 ? "#3fb950" : "#f85149" }}>
-                      {fmtMoney(Math.round(rangeStats.realized + rangeStats.unrealized))}
-                    </div>
-                    <div style={{ fontSize: 11, color: "#484f58", marginTop: 4 }}>已實現＋未實現合計</div>
-                  </div>
+                  ))}
                 </div>
-
-                {/* 未實現明細 */}
                 {rangeStats.unrealRows.length > 0 && (
                   <div className="card">
                     <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14, color: "#8b949e" }}>區間買入、尚未賣出的持股（未實現損益明細）</h3>
                     <div style={{ overflowX: "auto" }}>
                       <table className="tbl">
-                        <thead>
-                          <tr><th>股票</th><th>持股數</th><th>買入成本</th><th>現值</th><th>未實現損益</th><th>損益%</th></tr>
-                        </thead>
+                        <thead><tr><th>股票</th><th>持股數</th><th>買入成本</th><th>現值</th><th>未實現損益</th><th>損益%</th></tr></thead>
                         <tbody>
                           {rangeStats.unrealRows.map((r) => (
                             <tr key={r.code}>
                               <td><div style={{ fontWeight: 600 }}>{r.code}</div><div style={{ fontSize: 11, color: "#8b949e" }}>{r.name}</div></td>
                               <td className="mono">{fmtNum(r.qty)}</td>
                               <td className="mono pz">{fmtNum(Math.round(r.cost))}</td>
-                              <td className="mono">
-                                {r.hasLive ? fmtNum(Math.round(r.mkt)) : <span style={{ color: "#484f58" }}>—（以成本估）</span>}
-                              </td>
+                              <td className="mono">{r.hasLive ? fmtNum(Math.round(r.mkt)) : <span style={{ color: "#484f58" }}>—（以成本估）</span>}</td>
                               <td className={`mono ${r.pnl >= 0 ? "pp" : "pn"}`} style={{ fontWeight: 700 }}>{fmtMoney(Math.round(r.pnl))}</td>
-                              <td>
-                                <span className="bdg" style={{ background: r.pct >= 0 ? "#1a3a2a" : "#3a1a1a", color: r.pct >= 0 ? "#3fb950" : "#f85149" }}>
-                                  {fmtMoney(r.pct.toFixed(2))}%
-                                </span>
-                              </td>
+                              <td><span className="bdg" style={{ background: r.pct >= 0 ? "#1a3a2a" : "#3a1a1a", color: r.pct >= 0 ? "#3fb950" : "#f85149" }}>{fmtMoney(r.pct.toFixed(2))}%</span></td>
                             </tr>
                           ))}
                         </tbody>
@@ -1219,89 +1078,47 @@ export default function App() {
                     </div>
                   </div>
                 )}
-
-                {rangeStats.unrealRows.length === 0 && rangeStats.realized === 0 && (
-                  <div className="card"><div className="emp">此區間內無交易記錄</div></div>
-                )}
+                {rangeStats.unrealRows.length === 0 && rangeStats.realized === 0 && <div className="card"><div className="emp">此區間內無交易記錄</div></div>}
               </>
             )}
           </div>
         )}
       </div>
 
-      {/* Add/Edit Trade Modal */}
+      {/* Add/Edit Modal */}
       {showForm && (
         <div className="ov" onClick={(e) => e.target === e.currentTarget && setShowForm(false)}>
           <div className="md">
             <h3 style={{ marginBottom: 20, fontSize: 16 }}>{editTrade ? "✏️ 編輯交易" : "➕ 新增交易"}</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="g2">
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>日期 *</label>
-                  <input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>類型 *</label>
-                  <select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value }))}>
-                    <option value="buy">買進</option><option value="sell">賣出</option>
-                  </select>
-                </div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>日期 *</label><input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>類型 *</label><select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value }))}><option value="buy">買進</option><option value="sell">賣出</option></select></div>
               </div>
               <div className="g2">
                 <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>
-                    股票代號 *
-                    {stockLookup.error && <span style={{ color: "#f85149", fontSize: 11, marginLeft: 6 }}>⚠ {stockLookup.error}</span>}
-                  </label>
-                  <input placeholder="例：2330 或 AAPL" value={form.stock}
-                    onChange={(e) => { const v = e.target.value; setForm((f) => ({ ...f, stock: v, name: "" })); setStockLookup({ loading: false, error: "" }); if (v.length >= 2) lookupStock(v); }}
-                    onBlur={(e) => lookupStock(e.target.value)} />
+                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>股票代號 *{stockLookup.error && <span style={{ color: "#f85149", fontSize: 11, marginLeft: 6 }}>⚠ {stockLookup.error}</span>}</label>
+                  <input placeholder="例：2330 或 AAPL" value={form.stock} onChange={(e) => { const v = e.target.value; setForm((f) => ({ ...f, stock: v, name: "" })); setStockLookup({ loading: false, error: "" }); if (v.length >= 2) lookupStock(v); }} onBlur={(e) => lookupStock(e.target.value)} />
                 </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>股票名稱</label>
-                  <input placeholder="代號輸入後自動帶入" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-                </div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>股票名稱</label><input placeholder="代號輸入後自動帶入" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /></div>
               </div>
               <div className="g2">
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>數量（股）*</label>
-                  <input type="number" placeholder="1000" value={form.qty} onChange={(e) => setForm((f) => ({ ...f, qty: e.target.value }))} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>成交價 *</label>
-                  <input type="number" placeholder="0.00" step="0.01" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} />
-                </div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>數量（股）*</label><input type="number" placeholder="1000" value={form.qty} onChange={(e) => setForm((f) => ({ ...f, qty: e.target.value }))} /></div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>成交價 *</label><input type="number" placeholder="0.00" step="0.01" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} /></div>
               </div>
               <div className="g2">
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>手續費 <span style={{ color: "#484f58" }}>（留空＝自動計算）</span></label>
-                  <input type="number" placeholder={form.qty && form.price ? `自動：${calcFee(Number(form.qty), Number(form.price), feeDiscount)}` : "自動計算"} value={form.fee} onChange={(e) => setForm((f) => ({ ...f, fee: e.target.value }))} />
-                </div>
-                {form.type === "sell" && (
-                  <div>
-                    <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>交易稅</label>
-                    <input type="number" placeholder="賣出才需填" value={form.tax} onChange={(e) => setForm((f) => ({ ...f, tax: e.target.value }))} />
-                  </div>
-                )}
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>手續費 <span style={{ color: "#484f58" }}>（留空＝自動）</span></label><input type="number" placeholder={form.qty && form.price ? `自動：${calcFee(Number(form.qty), Number(form.price), feeDiscount)}` : "自動計算"} value={form.fee} onChange={(e) => setForm((f) => ({ ...f, fee: e.target.value }))} /></div>
+                {form.type === "sell" && <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 5 }}>交易稅</label><input type="number" placeholder="賣出才需填" value={form.tax} onChange={(e) => setForm((f) => ({ ...f, tax: e.target.value }))} /></div>}
               </div>
               {form.qty && form.price && (
                 <div style={{ background: "#0d1117", borderRadius: 8, padding: "12px 14px", fontSize: 12, display: "flex", gap: 24, flexWrap: "wrap" }}>
-                  <div>
-                    <span style={{ color: "#484f58" }}>交易金額</span><br />
-                    <span style={{ color: "#e6edf3", fontWeight: 700, fontFamily: "monospace", fontSize: 15 }}>${fmtNum(Number(form.qty) * Number(form.price))}</span>
-                  </div>
-                  <div>
-                    <span style={{ color: "#484f58" }}>手續費（{currentUser.broker} {Math.round(feeDiscount * 10)}折）</span><br />
-                    <span style={{ color: "#58a6ff", fontWeight: 700, fontFamily: "monospace", fontSize: 15 }}>${fmtNum(prevFeeAmt)}</span>
-                    {form.fee === "" && <span style={{ color: "#484f58", fontSize: 10, marginLeft: 4 }}>自動</span>}
-                  </div>
+                  <div><span style={{ color: "#484f58" }}>交易金額</span><br /><span style={{ color: "#e6edf3", fontWeight: 700, fontFamily: "monospace", fontSize: 15 }}>${fmtNum(Number(form.qty) * Number(form.price))}</span></div>
+                  <div><span style={{ color: "#484f58" }}>手續費</span><br /><span style={{ color: "#58a6ff", fontWeight: 700, fontFamily: "monospace", fontSize: 15 }}>${fmtNum(prevFeeAmt)}</span></div>
                 </div>
               )}
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 }}>
                 <button className="btn btn-g" onClick={() => setShowForm(false)}>取消</button>
-                <button className={`btn ${form.type === "sell" ? "btn-s" : "btn-p"}`} onClick={submitTrade}>
-                  {editTrade ? "儲存" : form.type === "buy" ? "確認買進" : "確認賣出"}
-                </button>
+                <button className={`btn ${form.type === "sell" ? "btn-s" : "btn-p"}`} onClick={submitTrade}>{editTrade ? "儲存" : form.type === "buy" ? "確認買進" : "確認賣出"}</button>
               </div>
             </div>
           </div>
@@ -1320,51 +1137,30 @@ export default function App() {
             </div>
             {settingsTab === "broker" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 6 }}>使用券商</label>
-                  <select value={sf.broker} onChange={(e) => { const b = BROKERS.find((x) => x.name === e.target.value); setSf((f) => ({ ...f, broker: e.target.value, feeDiscount: b ? b.defaultDiscount : f.feeDiscount })); }}>
-                    {BROKERS.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
-                  </select>
-                </div>
+                <div><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 6 }}>使用券商</label><select value={sf.broker} onChange={(e) => { const b = BROKERS.find((x) => x.name === e.target.value); setSf((f) => ({ ...f, broker: e.target.value, feeDiscount: b ? b.defaultDiscount : f.feeDiscount })); }}>{BROKERS.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}</select></div>
                 <div>
                   <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 6 }}>手續費折數</label>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <input type="number" step="0.01" min="0.01" max="1" value={sf.feeDiscount} onChange={(e) => setSf((f) => ({ ...f, feeDiscount: e.target.value }))} style={{ flex: 1 }} />
-                    <span style={{ fontSize: 12, color: "#8b949e", whiteSpace: "nowrap" }}>{sf.feeDiscount ? `${Math.round(Number(sf.feeDiscount) * 10)}折` : "—"}</span>
-                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="number" step="0.01" min="0.01" max="1" value={sf.feeDiscount} onChange={(e) => setSf((f) => ({ ...f, feeDiscount: e.target.value }))} style={{ flex: 1 }} /><span style={{ fontSize: 12, color: "#8b949e", whiteSpace: "nowrap" }}>{sf.feeDiscount ? `${Math.round(Number(sf.feeDiscount) * 10)}折` : "—"}</span></div>
                   <div style={{ fontSize: 11, color: "#484f58", marginTop: 5 }}>10 萬元手續費預估：<span style={{ color: "#e6edf3", fontFamily: "monospace" }}>NT$ {stPreviewFee}</span></div>
                 </div>
                 {sfErr && <div style={{ background: "#3a1a1a", border: "1px solid #f8514940", borderRadius: 6, padding: "9px 13px", fontSize: 13, color: "#f85149" }}>⚠️ {sfErr}</div>}
-                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                  <button className="btn btn-g" onClick={() => setSettings(false)}>取消</button>
-                  <button className="btn btn-p" onClick={saveBroker}>儲存設定</button>
-                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}><button className="btn btn-g" onClick={() => setSettings(false)}>取消</button><button className="btn btn-p" onClick={saveBroker}>儲存設定</button></div>
               </div>
             )}
             {settingsTab === "password" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 {[["oldPw", "舊密碼", "輸入目前密碼"], ["newPw", "新密碼", "至少 6 個字元"], ["confirmPw", "確認新密碼", "再輸入一次"]].map(([k, lbl, ph]) => (
-                  <div key={k}>
-                    <label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 6 }}>{lbl}</label>
-                    <input type="password" placeholder={ph} value={sf[k]} onChange={(e) => setSf((f) => ({ ...f, [k]: e.target.value }))} />
-                  </div>
+                  <div key={k}><label style={{ fontSize: 11, color: "#8b949e", display: "block", marginBottom: 6 }}>{lbl}</label><input type="password" placeholder={ph} value={sf[k]} onChange={(e) => setSf((f) => ({ ...f, [k]: e.target.value }))} /></div>
                 ))}
                 {sfErr && <div style={{ background: "#3a1a1a", border: "1px solid #f8514940", borderRadius: 6, padding: "9px 13px", fontSize: 13, color: "#f85149" }}>⚠️ {sfErr}</div>}
-                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                  <button className="btn btn-g" onClick={() => setSettings(false)}>取消</button>
-                  <button className="btn btn-p" onClick={changePw}>確認修改</button>
-                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}><button className="btn btn-g" onClick={() => setSettings(false)}>取消</button><button className="btn btn-p" onClick={changePw}>確認修改</button></div>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {notification && (
-        <div className={`notif ${notification.type === "error" ? "ne" : notification.type === "info" ? "ni" : "ns"}`}>
-          {notification.msg}
-        </div>
-      )}
+      {notification && <div className={`notif ${notification.type === "error" ? "ne" : notification.type === "info" ? "ni" : "ns"}`}>{notification.msg}</div>}
     </div>
   );
 }
